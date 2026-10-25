@@ -7,6 +7,7 @@ export class TestTransport implements Transport {
   onerror?: Transport['onerror'];
   hasPerRequestStream = false;
   supportsEvents = true;
+  listChanged = false;
   messages: Array<{message: JSONRPCMessage; options?: TransportSendOptions}> = [];
   handle: (message: JSONRPCRequest, options?: TransportSendOptions) => void | Promise<void> = () => {};
   async start() {}
@@ -17,7 +18,7 @@ export class TestTransport implements Transport {
     if (message.method === 'server/discover') {
       this.respond(message, {
         supportedVersions: [PROTOCOL_VERSION],
-        capabilities: this.supportsEvents ? {extensions: {[EVENTS_EXTENSION]: {}}} : {},
+        capabilities: this.supportsEvents ? {extensions: {[EVENTS_EXTENSION]: {listChanged: this.listChanged}}} : {},
       });
       return;
     }
