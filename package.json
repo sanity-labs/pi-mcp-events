@@ -1,0 +1,44 @@
+{
+  "name": "@sanity-labs/pi-mcp-events",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP Events delivery for Pi using poll, push, and webhooks",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "mcp",
+    "events"
+  ],
+  "files": [
+    "dist",
+    "docs/events-draft.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "zod": "4.6.7"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@types/node": "24.10.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.12"
+  }
+}
