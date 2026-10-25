@@ -19,8 +19,9 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "prepack": "npm run build",
-    "validate": "npm run check && npm test && npm run build",
-    "prepare": "npm run build"
+    "validate": "npm run check && npm test && npm run build && npm run test:pi",
+    "prepare": "npm run build",
+    "test:pi": "node --test --test-concurrency=1 test/pi.integration.mjs"
   },
   "engines": {
     "node": ">=24"
@@ -35,6 +36,8 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@types/node": "24.10.1",
     "typescript": "6.0.3",
     "vitest": "4.1.12"
@@ -45,10 +48,26 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./pi": {
+      "types": "./dist/pi-contract.d.ts",
+      "import": "./dist/pi-contract.js"
+    },
+    "./extension": {
+      "types": "./dist/extension.d.ts",
+      "import": "./dist/extension.js"
     }
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/sanity-labs/pi-mcp-events.git"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
   }
 }
