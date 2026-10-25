@@ -206,7 +206,8 @@ export class EventsWire {
         void writes.then(() => end(new Error('Event stream disconnected')));
       },
     }).catch(end);
-    return done.promise;
+    try { await done.promise; }
+    finally { await writes; }
   }
 
   async close() {

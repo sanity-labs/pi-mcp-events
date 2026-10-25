@@ -9,7 +9,7 @@ type RetryOptions = {
   onRetry(): Promise<void>;
 };
 
-function retryable(error: unknown): boolean {
+export function retryable(error: unknown): boolean {
   if (error instanceof EventsClientError) {
     return error.code === EventsClientErrorCode.RequestFailed
       || error.code === EventsClientErrorCode.ConsumerRejected
