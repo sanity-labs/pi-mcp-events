@@ -39,6 +39,7 @@
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@types/node": "24.10.1",
+    "fast-check": "4.10.2",
     "typescript": "6.0.3",
     "vitest": "4.1.12"
   },
