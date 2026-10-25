@@ -5,3 +5,4 @@ export {EVENTS_EXTENSION, PROTOCOL_VERSION, EventProtocolError, EventProtocolErr
 export {WebhookReceiver, type WebhookOptions, type WebhookRegistration, type WebhookDelivery} from './webhook.ts';
 export {parseConfig, readConfig, createTransport, createReceiver, type EventsConfig, type ServerConfig} from './config.ts';
 export {Inbox, Checkpoints, type InboxItem, type InboxOptions, type CheckpointOptions} from './inbox.ts';
+export {SessionState, type SessionStateOptions, type PersistenceWarning} from './session-state.ts';

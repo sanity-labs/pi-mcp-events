@@ -44,6 +44,11 @@ export class Inbox {
     encodeState({version: 1, items: this.items}, this.options.maxBytes);
   }
   get size() { return this.items.length; }
+  toMemory(): Inbox {
+    const inbox = new Inbox(undefined, this.options);
+    inbox.items = [...this.snapshot()];
+    return inbox;
+  }
   private check(items: readonly InboxItem[]) {
     if (items.length > this.options.maxItems) throw limitExceeded('maxItems', this.options.maxItems);
   }
@@ -94,6 +99,11 @@ export class Checkpoints {
     encodeState({version: 1, cursors: [...this.values]}, this.options.maxBytes);
   }
   get(key: string): string | null { return this.values.get(key) ?? null; }
+  toMemory(): Checkpoints {
+    const checkpoints = new Checkpoints(undefined, this.options);
+    checkpoints.values = new Map(this.values);
+    return checkpoints;
+  }
   private check(values: ReadonlyMap<string, string>) {
     if (values.size > this.options.maxEntries) throw limitExceeded('maxEntries', this.options.maxEntries);
   }
