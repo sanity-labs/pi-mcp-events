@@ -7,6 +7,7 @@ import {
 } from './protocol.ts';
 import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
 import {retryable, retryOperation} from './retry.ts';
+import {clientSettingsSchema, watchOptionsSchema} from './options.ts';
 import {WebhookReceiver} from './webhook.ts';
 import {subscribeWebhook} from './webhook-subscription.ts';
 import {streamEvents} from './stream.ts';
@@ -52,26 +53,7 @@ export type ClientOptions = {
   maxPollBytes?: number;
   maxTrackedEventIds?: number;
 };
-const watchSchema = z.object({
-  name: z.string().min(1), arguments: z.record(z.string(), z.unknown()),
-  mode: z.enum(['poll', 'push', 'webhook']), ttlMs: z.number().int().positive().nullable().optional(), cursor: z.string().nullable().optional(),
-  maxAgeMs: z.number().int().nonnegative().optional(), maxEvents: z.number().int().positive().default(50),
-});
-const clientSchema = z.object({
-  webhookReceiver: z.instanceof(WebhookReceiver).optional(),
-  webhookRefreshMs: z.number().int().positive().default(5 * 60_000),
-  webhookUnsubscribeTimeoutMs: z.number().int().positive().max(2 ** 31 - 1).default(5000),
-  catalogAckTimeoutMs: z.number().int().positive().default(30_000),
-  heartbeatMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER / 2).default(30_000),
-  pollFloorMs: z.number().int().positive().default(1000),
-  retryMs: z.number().int().positive().max(30_000).default(1000),
-  maxRetries: z.number().int().nonnegative().default(10),
-  maxSubscriptions: z.number().int().positive().default(32),
-  maxCatalogEntries: z.number().int().positive().default(1000),
-  maxCatalogPages: z.number().int().positive().default(100),
-  maxPollBytes: z.number().int().positive().default(256 * 1024),
-  maxTrackedEventIds: z.number().int().positive().default(4096),
-});
+const clientSchema = clientSettingsSchema.extend({webhookReceiver: z.instanceof(WebhookReceiver).optional()});
 
 function needsRediscovery(error: unknown): boolean {
   if (!(error instanceof EventProtocolError)) return false;
@@ -168,7 +150,7 @@ export class EventsClient {
   }
   watch(input: WatchOptions, accept: (observation: Observation) => Promise<void> | void, checkpoint?: (cursor: string | null) => Promise<void> | void): Watch {
     this.assertOpen();
-    const parsed = watchSchema.safeParse(input);
+    const parsed = watchOptionsSchema.safeParse(input);
     if (!parsed.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid event watch options', {cause: parsed.error});
     const options = parsed.data;
     this.contract(options);

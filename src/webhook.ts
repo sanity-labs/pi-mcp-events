@@ -19,7 +19,7 @@ export type WebhookRegistration = {
   bind(id: string): void;
   close(): Promise<void>;
 };
-const optionsSchema = z.object({
+export const webhookOptionsSchema = z.object({
   publicUrl: z.url(), host: z.string().min(1).default('127.0.0.1'), port: z.number().int().min(0).max(65535),
   tls: z.object({key: z.string().min(1), cert: z.string().min(1)}).optional(),
   maxBodyBytes: z.number().int().positive().default(256 * 1024),
@@ -29,7 +29,7 @@ const optionsSchema = z.object({
   deduplicationTtlMs: z.number().int().positive().default(15 * 60_000),
   requestTimeoutMs: z.number().int().positive().max(2 ** 31 - 1).default(10_000),
 });
-export type WebhookOptions = z.input<typeof optionsSchema>;
+export type WebhookOptions = z.input<typeof webhookOptionsSchema>;
 type Route = {
   verifier: Webhook;
   id?: string;
@@ -44,8 +44,18 @@ function singleHeader(request: IncomingMessage, name: string) {
   return values?.length === 1 ? values[0] : undefined;
 }
 
+export function validateWebhookAddress(settings: Pick<WebhookOptions, 'publicUrl' | 'host'>, hasTls: boolean) {
+  const url = new URL(settings.publicUrl);
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+    throw new EventsClientError(ErrorCode.InvalidOptions, 'Webhook publicUrl must use HTTPS without credentials, query, or fragment');
+  }
+  if (!hasTls && !['127.0.0.1', '::1'].includes(settings.host ?? '127.0.0.1')) {
+    throw new EventsClientError(ErrorCode.InvalidOptions, 'A receiver without TLS must bind to loopback behind an HTTPS proxy');
+  }
+}
+
 export class WebhookReceiver {
-  private readonly options: z.output<typeof optionsSchema>;
+  private readonly options: z.output<typeof webhookOptionsSchema>;
   private readonly routes = new Map<string, Route>();
   private server?: Server;
   private starting?: Promise<void>;
@@ -53,16 +63,10 @@ export class WebhookReceiver {
   private closed = false;
 
   constructor(options: WebhookOptions) {
-    const parsed = optionsSchema.safeParse(options);
+    const parsed = webhookOptionsSchema.safeParse(options);
     if (!parsed.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid webhook receiver options', {cause: parsed.error});
     this.options = parsed.data;
-    const url = new URL(this.options.publicUrl);
-    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-      throw new EventsClientError(ErrorCode.InvalidOptions, 'Webhook publicUrl must use HTTPS without credentials, query, or fragment');
-    }
-    if (!this.options.tls && !['127.0.0.1', '::1'].includes(this.options.host)) {
-      throw new EventsClientError(ErrorCode.InvalidOptions, 'A receiver without TLS must bind to loopback behind an HTTPS proxy');
-    }
+    validateWebhookAddress(this.options, this.options.tls !== undefined);
   }
   private assertOpen() {
     if (this.closed) throw new EventsClientError(ErrorCode.Closed, 'Webhook receiver is closed');
