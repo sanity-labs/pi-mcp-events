@@ -3,10 +3,12 @@ import delay from 'delay';
 import {z} from 'zod';
 import {
   canonical, catalogResult, EventProtocolError, EventProtocolErrorCode, pollResult,
-  type EventDescriptor, type EventOccurrence,
+  type EventDescriptor, type EventOccurrence, type WebhookDeliveryStatus,
 } from './protocol.ts';
 import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
 import {retryable, retryOperation} from './retry.ts';
+import {WebhookReceiver} from './webhook.ts';
+import {subscribeWebhook} from './webhook-subscription.ts';
 import {streamEvents} from './stream.ts';
 import {listenCatalog} from './catalog.ts';
 import {normalizeRequestError} from './request-error.ts';
@@ -16,7 +18,8 @@ import {EventsWire} from './wire.ts';
 export type WatchOptions = {
   name: string;
   arguments: Record<string, unknown>;
-  mode: 'poll' | 'push';
+  mode: 'poll' | 'push' | 'webhook';
+  ttlMs?: number | null;
   cursor?: string | null;
   maxAgeMs?: number;
   maxEvents?: number;
@@ -25,6 +28,7 @@ export type Observation =
   | {type: 'event'; event: EventOccurrence}
   | {type: 'gap'; cursor: string | null}
   | {type: 'status'; status: 'retrying' | 'stopped'}
+  | {type: 'status'; status: 'webhook-delivery'; deliveryStatus: WebhookDeliveryStatus}
   | {type: 'status'; status: 'source-error'; error: EventProtocolError};
 export type Watch = {
   readonly ready: Promise<void>;
@@ -34,6 +38,9 @@ export type Watch = {
   stop(): Promise<void>;
 };
 export type ClientOptions = {
+  webhookReceiver?: WebhookReceiver;
+  webhookRefreshMs?: number;
+  webhookUnsubscribeTimeoutMs?: number;
   pollFloorMs?: number;
   heartbeatMs?: number;
   catalogAckTimeoutMs?: number;
@@ -47,10 +54,13 @@ export type ClientOptions = {
 };
 const watchSchema = z.object({
   name: z.string().min(1), arguments: z.record(z.string(), z.unknown()),
-  mode: z.enum(['poll', 'push']), cursor: z.string().nullable().optional(),
+  mode: z.enum(['poll', 'push', 'webhook']), ttlMs: z.number().int().positive().nullable().optional(), cursor: z.string().nullable().optional(),
   maxAgeMs: z.number().int().nonnegative().optional(), maxEvents: z.number().int().positive().default(50),
 });
 const clientSchema = z.object({
+  webhookReceiver: z.instanceof(WebhookReceiver).optional(),
+  webhookRefreshMs: z.number().int().positive().default(5 * 60_000),
+  webhookUnsubscribeTimeoutMs: z.number().int().positive().max(2 ** 31 - 1).default(5000),
   catalogAckTimeoutMs: z.number().int().positive().default(30_000),
   heartbeatMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER / 2).default(30_000),
   pollFloorMs: z.number().int().positive().default(1000),
@@ -73,7 +83,7 @@ function needsRediscovery(error: unknown): boolean {
 
 export class EventsClient {
   private readonly wire: EventsWire;
-  private readonly settings: Required<ClientOptions>;
+  private readonly settings: z.output<typeof clientSchema>;
   private readonly lifetime = new AbortController();
   private readonly watches = new Map<string, Watch>();
   private contracts = new Map<string, EventContract>();
@@ -162,6 +172,9 @@ export class EventsClient {
     if (!parsed.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid event watch options', {cause: parsed.error});
     const options = parsed.data;
     this.contract(options);
+    if (options.mode === 'webhook' && !this.settings.webhookReceiver) {
+      throw new EventsClientError(ErrorCode.InvalidOptions, 'Webhook watches require a webhookReceiver');
+    }
     let key: string;
     try { key = canonical([options.name, options.arguments, options.mode]); }
     catch (error) { throw new EventsClientError(ErrorCode.InvalidArguments, 'Event arguments must be JSON values', {cause: error}); }
@@ -278,10 +291,42 @@ export class EventsClient {
         await delay(this.settings.retryMs, {signal});
       }
     };
+    const webhook = async () => {
+      let rediscovered = false;
+      while (!signal.aborted) {
+        try {
+          await subscribeWebhook(this.wire, this.settings.webhookReceiver!, {...this.settings, ...options}, signal, {
+            validate: () => { this.contract(options); },
+            cursor: () => cursor,
+            active: async (next, truncated) => {
+              if (next !== null && truncated) await deliver({type: 'gap', cursor: next});
+              await advance(next);
+              ready.resolve();
+            },
+            event: async event => { await emit(event); await advance(event.cursor); rediscovered = false; },
+            gap: async next => { await deliver({type: 'gap', cursor: next}); await advance(next); },
+            deliveryStatus: async deliveryStatus => {
+              try { await accept({type: 'status', status: 'webhook-delivery', deliveryStatus}); }
+              catch { /* Status delivery must not stop the source. */ }
+            },
+            refreshCatalog: async () => { await this.refresh(); this.contract(options); },
+            retrying: () => status('retrying'),
+          });
+        } catch (error) {
+          signal.throwIfAborted();
+          const reason = error instanceof EventsClientError && error.code === ErrorCode.SubscriptionTerminated
+            ? error.cause : error;
+          if (!needsRediscovery(reason) || rediscovered) throw error;
+          rediscovered = true;
+          await rediscover();
+        }
+      }
+    };
     const run = async () => {
       try {
         if (options.mode === 'poll') await poll();
-        else await push();
+        else if (options.mode === 'push') await push();
+        else await webhook();
       }
       catch (error) {
         if (!signal.aborted) {
