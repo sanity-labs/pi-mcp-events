@@ -31,7 +31,9 @@ export type Observation =
   | {type: 'status'; status: 'retrying' | 'stopped'}
   | {type: 'status'; status: 'webhook-delivery'; deliveryStatus: WebhookDeliveryStatus}
   | {type: 'status'; status: 'source-error'; error: EventProtocolError};
+export type WatchStatus = 'starting' | 'active' | 'retrying' | 'suspended' | 'stopped';
 export type Watch = {
+  readonly status: WatchStatus;
   readonly ready: Promise<void>;
   readonly closed: Promise<void>;
   readonly cursor: string | null;
@@ -167,8 +169,10 @@ export class EventsClient {
     const ready = Promise.withResolvers<void>();
     void ready.promise.catch(() => {});
     let cursor = options.cursor ?? null;
+    let currentStatus: WatchStatus = 'starting';
     const seen = new Set<string>();
     const status = async (value: 'retrying' | 'stopped') => {
+      currentStatus = value;
       try { await accept({type: 'status', status: value}); }
       catch { /* A full consumer inbox must not prevent delivery retries. */ }
     };
@@ -227,6 +231,7 @@ export class EventsClient {
           await emit(event);
         }
         await advance(result.cursor);
+        currentStatus = 'active';
         ready.resolve();
         if (!result.hasMore) await delay(Math.max(this.settings.pollFloorMs, result.nextPollMs), {signal});
       }
@@ -237,7 +242,7 @@ export class EventsClient {
         await retry(async () => {
           this.contract(options);
           let progressed = false;
-          const progress = () => { progressed = true; rediscovered = false; };
+          const progress = () => { progressed = true; rediscovered = false; currentStatus = 'active'; };
           try {
             await streamEvents(this.wire, {
               name: options.name, arguments: options.arguments, cursor,
@@ -246,6 +251,7 @@ export class EventsClient {
               active: async (next, truncated) => {
                 if (next !== null && truncated) await deliver({type: 'gap', cursor: next});
                 await advance(next);
+                currentStatus = 'active';
                 ready.resolve();
               },
               event: async event => { await emit(event); await advance(event.cursor); progress(); },
@@ -275,18 +281,27 @@ export class EventsClient {
     };
     const webhook = async () => {
       let rediscovered = false;
+      let suspended = false;
       while (!signal.aborted) {
         try {
           await subscribeWebhook(this.wire, this.settings.webhookReceiver!, {...this.settings, ...options}, signal, {
             validate: () => { this.contract(options); },
             cursor: () => cursor,
-            active: async (next, truncated) => {
+            active: async (next, truncated, deliveryStatus) => {
               if (next !== null && truncated) await deliver({type: 'gap', cursor: next});
               await advance(next);
+              if (deliveryStatus) suspended = !deliveryStatus.active;
+              currentStatus = suspended ? 'suspended' : 'active';
               ready.resolve();
             },
-            event: async event => { await emit(event); await advance(event.cursor); rediscovered = false; },
-            gap: async next => { await deliver({type: 'gap', cursor: next}); await advance(next); },
+            event: async event => {
+              await emit(event); await advance(event.cursor); rediscovered = false;
+              currentStatus = suspended ? 'suspended' : 'active';
+            },
+            gap: async next => {
+              await deliver({type: 'gap', cursor: next}); await advance(next);
+              currentStatus = suspended ? 'suspended' : 'active';
+            },
             deliveryStatus: async deliveryStatus => {
               try { await accept({type: 'status', status: 'webhook-delivery', deliveryStatus}); }
               catch { /* Status delivery must not stop the source. */ }
@@ -317,6 +332,7 @@ export class EventsClient {
           throw error;
         }
       } finally {
+        currentStatus = 'stopped';
         ready.reject(new EventsClientError(ErrorCode.Stopped, 'Subscription stopped before becoming active'));
         this.watches.delete(key);
       }
@@ -324,7 +340,7 @@ export class EventsClient {
     const closed = Promise.resolve().then(run);
     void closed.catch(() => {});
     const watch: Watch = {
-      options, ready: ready.promise, closed, get cursor() { return cursor; },
+      options, ready: ready.promise, closed, get cursor() { return cursor; }, get status() { return currentStatus; },
       stop: async () => {
         local.abort(new EventsClientError(ErrorCode.Stopped, 'Event subscription stopped'));
         await closed.catch(() => {});

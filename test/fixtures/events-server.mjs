@@ -162,6 +162,12 @@ export async function startFixture(tls) {
       connection: {baseUrl, url: `${baseUrl}/mcp`, token, callbackOrigin, callbackPort, callbackTls: false, webhookEventName: 'example.live_changed', webhookReplay: false},
       requests,
       disconnect() { for (const stream of streams) stream.response.end(); },
+      terminateStreams() {
+        for (const stream of streams) {
+          notify(stream, 'terminated', {error: {code: -32024, message: 'Fixture subscription ended'}});
+          stream.response.end();
+        }
+      },
       stats: () => ({streams: streams.size, webhooks: webhooks.size, verifications, deliveries}),
       async close() {for (const stream of streams) stream.response.end(); await close(server); await close(proxy);},
     };

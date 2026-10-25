@@ -34,7 +34,7 @@ function files(path) {
     return [full.slice(path.length), readFileSync(full, 'utf8')];
   }));
 }
-async function setup(t, {ephemeral = true, override = true, blocked = false} = {}) {
+async function setup(t, {ephemeral = true, override = true, blocked = false, configure = config => config} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-events-cli-'));
   const agentDir = join(directory, 'agent'); mkdirSync(agentDir);
   const key = join(directory, 'key.pem'); const cert = join(directory, 'cert.pem');
@@ -45,13 +45,13 @@ async function setup(t, {ephemeral = true, override = true, blocked = false} = {
   else { mkdirSync(stateDir); if (ephemeral) writeFileSync(join(stateDir, 'saved-state.json'), 'preserve existing saved-session state'); }
   const configPath = join(directory, 'events.json');
   const {url, token, callbackOrigin, callbackPort} = fixture.connection;
-  writeFileSync(configPath, JSON.stringify({
+  writeFileSync(configPath, JSON.stringify(configure({
     ...(override ? {stateDir: 'custom-state'} : {}),
     client: {pollFloorMs: 20, retryMs: 10, webhookUnsubscribeTimeoutMs: 500},
     servers: {local: {transport: 'http', url, headers: {Authorization: `Bearer ${token}`}}},
     webhook: {publicUrl: `${callbackOrigin}/hooks`, host: '127.0.0.1', port: callbackPort},
     watches: modes.map(mode => ({id: mode, server: 'local', name: mode === 'webhook' ? 'example.live_changed' : 'example.changed', mode, arguments: {channel: mode}, ttlMs: null})),
-  }));
+  })));
   const contexts = join(directory, 'contexts.jsonl'); const acceptedPath = join(directory, 'accepted.jsonl'); const release = join(directory, 'release');
   writeFileSync(join(directory, 'ordinary.txt'), 'ordinary tool use still works');
   let rpc;
@@ -99,6 +99,43 @@ async function setup(t, {ephemeral = true, override = true, blocked = false} = {
   };
   return {directory, agentDir, stateDir, fixture, start, emit, received, accepted, hold, shutdown, contexts, release};
 }
+
+test('subscription status identifies each watch and retains stopped and failed watches', {timeout: 45_000}, async t => {
+  const h = await setup(t, {configure: config => ({...config,
+    servers: {...config.servers, unauthorized: {...config.servers.local, headers: {Authorization: 'Bearer private-test-credential'}}},
+    watches: [...config.watches,
+      {id: 'missing', server: 'local', name: 'example.missing', mode: 'poll', arguments: {secret: 'private-test-argument'}},
+      {id: 'inaccessible', server: 'unauthorized', name: 'example.changed', mode: 'poll'},
+    ],
+  })});
+  const rpc = await h.start();
+  const status = async () => {
+    await rpc.prompt('/mcp-events status');
+    const messages = await rpc.getMessages();
+    return messages.filter(message => message.customType === 'mcp-events-status').at(-1)?.content;
+  };
+  await until(async () => (await status())?.includes('webhook: active'), 'all watches ready for inspection');
+  let content = await status();
+  for (const mode of modes) {
+    const name = mode === 'webhook' ? 'example.live_changed' : 'example.changed';
+    assert.ok(content.includes(`${mode}: active — local / ${name} (${mode})`));
+  }
+  assert.ok(content.includes('3 running watch(es)'));
+  assert.ok(content.includes('missing: could not start'));
+  assert.ok(content.includes('inaccessible: connection failed'));
+  assert.ok(content.includes('memory only'));
+  for (const secret of ['private-test-credential', 'private-test-argument', h.fixture.connection.token]) assert.ok(!content.includes(secret));
+  await rpc.prompt('/mcp-events stop poll');
+  content = await status();
+  assert.ok(content.includes('poll: stopped'));
+  assert.ok(content.includes('2 running watch(es)'));
+  h.fixture.terminateStreams();
+  await until(async () => (await status())?.includes('push: failed'), 'terminal failure remains visible');
+  content = await status();
+  assert.ok(content.includes('webhook: active'));
+  assert.ok(content.includes('1 running watch(es)'));
+  await h.shutdown();
+});
 
 for (const override of [false, true]) {
   test(`stock Pi --no-session: all transports, busy delivery, reconnect, fresh sessions, cleanup (${override ? 'stateDir' : 'Pi agent directory'})`, {timeout: 60_000}, async t => {

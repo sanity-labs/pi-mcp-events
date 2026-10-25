@@ -61,6 +61,27 @@ async function setup(settings: ClientOptions = {}) {
 }
 
 describe('webhook watches', () => {
+  it('reports suspended delivery and recovers on renewal without an event', async () => {
+    const s = await setup({webhookRefreshMs: 20});
+    s.subscribe(() => {});
+    const watch = s.client.watch(options, () => {});
+    expect(watch.status).toBe('starting');
+    await vi.waitFor(() => expect(s.subscriptions).toHaveLength(1));
+    s.grant(s.subscriptions[0]!, {deliveryStatus: {active: false, lastError: 'timeout'}});
+    await watch.ready;
+    expect(watch.status).toBe('suspended');
+    await vi.waitFor(() => expect(s.subscriptions).toHaveLength(2));
+    s.transport.fail(s.subscriptions[1]!, -32603);
+    await vi.waitFor(() => expect(s.subscriptions).toHaveLength(3));
+    expect(watch.status).toBe('retrying');
+    s.grant(s.subscriptions[2]!);
+    await vi.waitFor(() => expect(s.subscriptions).toHaveLength(4));
+    expect(watch.status).toBe('suspended');
+    s.grant(s.subscriptions[3]!, {deliveryStatus: {active: true}});
+    await vi.waitFor(() => expect(watch.status).toBe('active'));
+    await watch.stop();
+    expect(watch.status).toBe('stopped');
+  });
   it('verifies before the first grant, retries early delivery, and checkpoints accepted events', async () => {
     const s = await setup();
     s.subscribe(async req => {
