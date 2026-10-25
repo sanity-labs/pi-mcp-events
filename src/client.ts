@@ -1,4 +1,4 @@
-import {ProtocolError, SdkError, SdkErrorCode, type StandardSchemaV1} from '@modelcontextprotocol/client';
+import {ProtocolError, type StandardSchemaV1} from '@modelcontextprotocol/client';
 import delay from 'delay';
 import {z} from 'zod';
 import {
@@ -8,6 +8,8 @@ import {
 import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
 import {retryable, retryOperation} from './retry.ts';
 import {streamEvents} from './stream.ts';
+import {listenCatalog} from './catalog.ts';
+import {normalizeRequestError} from './request-error.ts';
 import {EventContract} from './validation.ts';
 import {EventsWire} from './wire.ts';
 
@@ -34,6 +36,7 @@ export type Watch = {
 export type ClientOptions = {
   pollFloorMs?: number;
   heartbeatMs?: number;
+  catalogAckTimeoutMs?: number;
   retryMs?: number;
   maxRetries?: number;
   maxSubscriptions?: number;
@@ -48,6 +51,7 @@ const watchSchema = z.object({
   maxAgeMs: z.number().int().nonnegative().optional(), maxEvents: z.number().int().positive().default(50),
 });
 const clientSchema = z.object({
+  catalogAckTimeoutMs: z.number().int().positive().default(30_000),
   heartbeatMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER / 2).default(30_000),
   pollFloorMs: z.number().int().positive().default(1000),
   retryMs: z.number().int().positive().max(30_000).default(1000),
@@ -67,15 +71,6 @@ function needsRediscovery(error: unknown): boolean {
     && typeof data === 'object' && data !== null && 'reason' in data && data.reason === 'schema_changed';
 }
 
-function normalizeRequestError(error: unknown) {
-  if (error instanceof EventsClientError || error instanceof EventProtocolError) return error;
-  if (error instanceof ProtocolError) return new EventProtocolError(error, {cause: error});
-  if (error instanceof SdkError && error.code === SdkErrorCode.InvalidResult) {
-    return new EventsClientError(ErrorCode.InvalidResponse, 'Invalid MCP Events response', {cause: error});
-  }
-  return new EventsClientError(ErrorCode.RequestFailed, 'MCP Events request failed', {cause: error});
-}
-
 export class EventsClient {
   private readonly wire: EventsWire;
   private readonly settings: Required<ClientOptions>;
@@ -83,6 +78,10 @@ export class EventsClient {
   private readonly watches = new Map<string, Watch>();
   private contracts = new Map<string, EventContract>();
   private refreshing?: Promise<EventDescriptor[]>;
+  private catalog?: Readonly<Pick<Watch, 'ready' | 'closed'>>;
+  private catalogRunning = false;
+
+  get catalogUpdates() { return this.catalog; }
 
   constructor(wire: EventsWire, settings: ClientOptions = {}) {
     this.wire = wire;
@@ -92,13 +91,27 @@ export class EventsClient {
   }
   async connect() {
     this.assertOpen();
-    try { await this.wire.connect(this.lifetime.signal); }
+    let extension: Record<string, unknown>;
+    try { extension = await this.wire.connect(this.lifetime.signal); }
     catch (error) {
       this.lifetime.signal.throwIfAborted();
       if (error instanceof ProtocolError || error instanceof EventProtocolError) throw normalizeRequestError(error);
       throw new EventsClientError(ErrorCode.ConnectionFailed, 'MCP Events connection failed', {cause: error});
     }
     await this.refresh();
+    this.assertOpen();
+    if (extension.listChanged === true && !this.catalogRunning) {
+      this.catalogRunning = true;
+      this.catalog = listenCatalog(this.wire, {
+        ...this.settings, signal: this.lifetime.signal,
+        refresh: async () => {
+          // A notification must trigger a read that starts after that notification.
+          await this.refreshing?.catch(() => {});
+          await this.refresh();
+        },
+      });
+      void this.catalog.closed.finally(() => { this.catalogRunning = false; }).catch(() => {});
+    }
   }
   list() { return [...this.contracts.values()].map(contract => contract.descriptor); }
   refresh(): Promise<EventDescriptor[]> {
@@ -296,6 +309,7 @@ export class EventsClient {
   async close() {
     this.lifetime.abort(new EventsClientError(ErrorCode.Closed, 'MCP Events client is closed'));
     await Promise.allSettled([...this.watches.values()].map(watch => watch.stop()));
+    await this.catalog?.closed.catch(() => {});
     try { await this.wire.close(); }
     catch (error) { throw new EventsClientError(ErrorCode.ConnectionFailed, 'MCP Events connection could not close', {cause: error}); }
   }
