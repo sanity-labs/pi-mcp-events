@@ -12,7 +12,7 @@
   ],
   "files": [
     "dist",
-    "docs/events-draft.md",
+    "docs",
     "README.md",
     "LICENSE"
   ],
@@ -20,7 +20,11 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test:package": "node scripts/test-package.mjs",
+    "test:mellon": "node scripts/test-mellon.mjs",
+    "validate": "npm run check && npm test && npm run test:package",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=24"
@@ -40,5 +44,30 @@
     "@types/node": "24.10.1",
     "typescript": "6.0.3",
     "vitest": "4.1.12"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./pi": {
+      "types": "./dist/pi-contract.d.ts",
+      "import": "./dist/pi-contract.js"
+    },
+    "./extension": {
+      "types": "./dist/extension.d.ts",
+      "import": "./dist/extension.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sanity-labs/pi-mcp-events.git"
   }
 }
