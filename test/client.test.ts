@@ -1,14 +1,9 @@
-import {setTimeout as sleep} from 'node:timers/promises';
 import type {JSONRPCRequest} from '@modelcontextprotocol/client';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {EventsClient, type ClientOptions, type Observation} from '../src/client.ts';
 import {EventsWire} from '../src/wire.ts';
 import {TestTransport} from './transport.ts';
-
-vi.mock('node:timers/promises', async importOriginal => {
-  const actual = await importOriginal<typeof import('node:timers/promises')>();
-  return {...actual, setTimeout: vi.fn(actual.setTimeout)};
-});
+import {EventsClientError, EventsClientErrorCode as ErrorCode, EventProtocolError, EventProtocolErrorCode} from '../src/index.ts';
 
 const descriptor = {
   name: 'example.changed', delivery: ['poll'],
@@ -21,7 +16,7 @@ const batch = {events: [], cursor: 'next', truncated: false, hasMore: false, nex
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map(close => close()));
-  vi.mocked(sleep).mockClear();
+  vi.useRealTimers();
 });
 function setup(settings: ClientOptions = {}) {
   const transport = new TestTransport();
@@ -102,19 +97,17 @@ describe('poll delivery', () => {
     expect(polls[1]!.params?.cursor).toBe('next');
   });
   it.each([0, 100, 2 ** 31])('honors polling delays of %i ms and the configured floor', async nextPollMs => {
+    vi.useFakeTimers();
     const {client, transport, polls} = setup();
     await client.connect();
-    const waiting = Promise.withResolvers<void>();
-    vi.mocked(sleep).mockImplementationOnce(() => waiting.promise);
     const watch = client.watch(options, () => {});
-    await vi.waitFor(() => expect(polls).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(0);
     transport.respond(polls[0]!, {...batch, nextPollMs});
     await watch.ready;
-    expect(sleep).toHaveBeenCalledWith(Math.min(Math.max(10, nextPollMs), 2 ** 31 - 1), undefined, {signal: expect.any(AbortSignal)});
+    await vi.advanceTimersByTimeAsync(Math.max(10, nextPollMs) - 1);
     expect(polls).toHaveLength(1);
-    waiting.resolve();
-    await vi.waitFor(() => expect(polls).toHaveLength(2));
-    if (nextPollMs === 2 ** 31) expect(sleep).toHaveBeenLastCalledWith(1, undefined, {signal: expect.any(AbortSignal)});
+    await vi.advanceTimersByTimeAsync(1);
+    expect(polls).toHaveLength(2);
   });
   it('reports a replay gap before events and clears the cursor when replay is unavailable', async () => {
     const {client, transport, polls} = setup();
@@ -184,12 +177,13 @@ describe('poll delivery', () => {
       'too-large': [{...event('e'), data: {value: 1, text: 'x'.repeat(256 * 1024)}}],
     }[kind]!;
     transport.respond(polls[0]!, {...batch, events: invalid});
-    await expect(watch.closed).rejects.toThrow('retry limit');
+    const code = kind === 'too-large' ? ErrorCode.LimitExceeded : ErrorCode.InvalidEvent;
+    await expect(watch.closed).rejects.toMatchObject({code: kind === 'too-many' ? ErrorCode.InvalidResponse : code});
     expect(watch.cursor).toBe('start');
     expect(checkpoint).not.toHaveBeenCalled();
     expect(accept.mock.calls.flat().filter(item => item.type === 'event')).toHaveLength(0);
   });
-  it.each([-32601, -32602, -32024, -32026])('stops on non-retryable protocol error %i', async code => {
+  it.each([-32601, -32602, -32024, -32025, -32026])('stops on non-retryable protocol error %i', async code => {
     const {client, transport, polls} = setup();
     await client.connect();
     const watch = client.watch(options, () => {});
@@ -222,7 +216,7 @@ describe('poll delivery', () => {
     };
     const received: string[] = [];
     let failedAt = -1;
-    const watch = client.watch({...options, cursor: '0', maxEvents: 500}, value => {
+    const watch = client.watch({...options, cursor: '0', maxEvents: 50}, value => {
       if (value.type !== 'event') return;
       if (received.length % 37 === 0 && failedAt !== received.length) {
         failedAt = received.length;
@@ -292,7 +286,7 @@ describe('poll delivery', () => {
     await vi.waitFor(() => expect(polls).toHaveLength(1));
     transport.handle = request => transport.respond(request, {events: []});
     transport.fail(polls[0]!, -32023);
-    await expect(watch.closed).rejects.toMatchObject({code: -32023});
+    await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.EventNotFound});
     expect(polls).toHaveLength(1);
   });
   it('stops with the validation error when a changed schema rejects existing arguments', async () => {
@@ -306,7 +300,7 @@ describe('poll delivery', () => {
       transport.respond(request, {events: [{...descriptor, inputSchema: {...descriptor.inputSchema, required: ['group']}}]});
     };
     transport.fail(polls[0]!, -32026, {reason: 'schema_changed'});
-    await expect(watch.closed).rejects.toMatchObject({code: -32602, message: 'Subscription arguments do not match inputSchema'});
+    await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.InvalidArguments, message: 'Subscription arguments do not match inputSchema'});
     expect(lists).toBe(1);
     expect(polls).toHaveLength(1);
     expect(watch.cursor).toBe('start');
@@ -344,4 +338,180 @@ describe('poll delivery', () => {
     await client.close();
     expect(() => client.watch(options, () => {})).toThrow('closed');
   });
+});
+
+describe('client limits and exported errors', () => {
+  it('keeps 32 subscriptions as a default and allows a higher configured limit', async () => {
+    const normal = setup();
+    await normal.client.connect();
+    for (let i = 0; i < 32; i++) normal.client.watch({...options, arguments: {group: String(i)}}, () => {});
+    expect(() => normal.client.watch({...options, arguments: {group: 'extra'}}, () => {}))
+      .toThrowError(expect.objectContaining({code: ErrorCode.LimitExceeded, details: {limit: 'maxSubscriptions', max: 32}}));
+    await normal.client.close();
+    const raised = setup({maxSubscriptions: 33});
+    await raised.client.connect();
+    for (let i = 0; i < 33; i++) raised.client.watch({...options, arguments: {group: String(i)}}, () => {});
+    await raised.client.close();
+  });
+  it.each(['maxCatalogEntries', 'maxCatalogPages'] as const)('reports %s structurally and allows raising it', async limit => {
+    for (const max of [1, 2]) {
+      const {client, transport} = setup({[limit]: max});
+      transport.handle = request => {
+        if (limit === 'maxCatalogEntries') transport.respond(request, {events: [descriptor, {...descriptor, name: 'second'}]});
+        else transport.respond(request, {events: [], ...(request.params?.cursor ? {} : {nextCursor: 'second'})});
+      };
+      if (max === 1) await expect(client.connect()).rejects.toMatchObject({code: ErrorCode.LimitExceeded, details: {limit, max}});
+      else await expect(client.connect()).resolves.toBeUndefined();
+    }
+  });
+  it('honors an explicit batch size above the default of 50', async () => {
+    const {client, transport, polls} = setup();
+    await client.connect();
+    const accept = vi.fn();
+    const watch = client.watch({...options, maxEvents: 75}, accept);
+    await vi.waitFor(() => expect(polls).toHaveLength(1));
+    expect(polls[0]!.params?.maxEvents).toBe(75);
+    transport.respond(polls[0]!, {...batch, events: Array.from({length: 75}, (_, i) => event(String(i)))});
+    await watch.ready;
+    expect(accept).toHaveBeenCalledTimes(75);
+  });
+  it('allows a larger poll response when the configured byte limit permits it', async () => {
+    const {client, transport, polls} = setup({maxPollBytes: 512 * 1024});
+    await client.connect();
+    const watch = client.watch(options, () => {});
+    await vi.waitFor(() => expect(polls).toHaveLength(1));
+    transport.respond(polls[0]!, {...batch, events: [{...event('large'), data: {value: 1, text: 'x'.repeat(300 * 1024)}}]});
+    await watch.ready;
+    expect(watch.cursor).toBe('next');
+  });
+  it('bounds deduplication by the configured number of tracked IDs', async () => {
+    const {client, transport, polls} = setup({maxTrackedEventIds: 1});
+    await client.connect();
+    const accept = vi.fn();
+    const watch = client.watch(options, accept);
+    await vi.waitFor(() => expect(polls).toHaveLength(1));
+    transport.respond(polls[0]!, {...batch, events: [event('a'), event('a'), event('b'), event('a')]});
+    await watch.ready;
+    expect(accept.mock.calls.map(([value]) => value.event.eventId)).toEqual(['a', 'b', 'a']);
+  });
+  it('exports SDK-independent local errors with stable codes, details, and causes', async () => {
+    expect(() => setup({maxSubscriptions: 0})).toThrowError(expect.objectContaining({code: ErrorCode.InvalidOptions, cause: expect.any(Error)}));
+    const {client} = setup();
+    await client.connect();
+    expect(() => client.watch({...options, arguments: {group: 123}}, () => {}))
+      .toThrowError(expect.objectContaining({code: ErrorCode.InvalidArguments, cause: expect.any(Error)}));
+    const error = new EventsClientError(ErrorCode.LimitExceeded, 'custom limit', {details: {limit: 'example', max: 1}});
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({code: ErrorCode.LimitExceeded, details: {limit: 'example', max: 1}});
+    await client.close();
+    await expect(client.refresh()).rejects.toMatchObject({code: ErrorCode.Closed});
+  });
+  it('normalizes remote SDK errors into the exported protocol error while preserving data', async () => {
+    const {client, transport, polls} = setup();
+    await client.connect();
+    const watch = client.watch(options, () => {});
+    await vi.waitFor(() => expect(polls).toHaveLength(1));
+    transport.fail(polls[0]!, EventProtocolErrorCode.Forbidden, {reason: 'access revoked'});
+    await expect(watch.closed).rejects.toBeInstanceOf(EventProtocolError);
+    await expect(watch.closed).rejects.toMatchObject({code: EventProtocolErrorCode.Forbidden, data: {reason: 'access revoked'}, cause: expect.any(Error)});
+  });
+  it('does not retry a malformed protocol response as a transient delivery failure', async () => {
+    const {client, transport, polls} = setup();
+    await client.connect();
+    const watch = client.watch(options, () => {});
+    await vi.waitFor(() => expect(polls).toHaveLength(1));
+    transport.respond(polls[0]!, {...batch, nextPollMs: 'invalid'});
+    await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.InvalidResponse, cause: expect.any(Error)});
+    expect(polls).toHaveLength(1);
+  });
+  it('retries a consumer rejection even when the underlying cause is a TypeError', async () => {
+    const {client, transport, polls} = setup();
+    await client.connect();
+    let attempts = 0;
+    const watch = client.watch(options, value => {
+      if (value.type === 'event' && ++attempts === 1) throw new TypeError('consumer unavailable');
+    });
+    await vi.waitFor(() => expect(polls).toHaveLength(1));
+    transport.respond(polls[0]!, {...batch, events: [event('e')]});
+    await watch.ready;
+    expect(attempts).toBe(2);
+    expect(polls).toHaveLength(1);
+  });
+  it('stops if the server still requires rediscovery immediately after a successful refresh', async () => {
+    const {client, transport} = setup();
+    let polls = 0;
+    let lists = 0;
+    transport.handle = request => {
+      if (request.method === 'events/list') { lists++; transport.respond(request, {events: [descriptor]}); }
+      else { polls++; transport.fail(request, EventProtocolErrorCode.Unsupported, {reason: 'schema_changed'}); }
+    };
+    await client.connect();
+    const watch = client.watch(options, () => {});
+    await expect(watch.closed).rejects.toMatchObject({code: EventProtocolErrorCode.Unsupported});
+    expect(polls).toBe(2);
+    expect(lists).toBe(2);
+  });
+  it('cancels a long polling wait on stop without issuing another poll', async () => {
+    vi.useFakeTimers();
+    const {client, transport, polls} = setup();
+    await client.connect();
+    const watch = client.watch(options, () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    transport.respond(polls[0]!, {...batch, nextPollMs: 2 ** 31});
+    await watch.ready;
+    await watch.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(2 ** 31);
+    expect(polls).toHaveLength(1);
+  });
+});
+
+it('retries catalog discovery on the established connection after connect fails', async () => {
+  const {client, transport} = setup();
+  let catalogs = 0;
+  transport.handle = request => {
+    if (++catalogs === 1) transport.fail(request, EventProtocolErrorCode.InternalError);
+    else transport.respond(request, {events: [descriptor]});
+  };
+  await expect(client.connect()).rejects.toMatchObject({code: EventProtocolErrorCode.InternalError});
+  expect(client.list()).toEqual([]);
+  expect(() => client.watch(options, () => {})).toThrowError(expect.objectContaining({code: ErrorCode.EventNotFound}));
+  await client.connect();
+  expect(client.list()).toEqual([descriptor]);
+  expect(catalogs).toBe(2);
+  expect(transport.messages.filter(({message}) => 'method' in message && message.method === 'server/discover')).toHaveLength(1);
+});
+
+it('reports failures after readiness through closed and the stopped observation', async () => {
+  const {client, transport, polls} = setup();
+  await client.connect();
+  const observations: Observation[] = [];
+  const watch = client.watch(options, value => { observations.push(value); });
+  await vi.waitFor(() => expect(polls).toHaveLength(1));
+  transport.respond(polls[0]!, {...batch, hasMore: true});
+  await watch.ready;
+  await vi.waitFor(() => expect(polls).toHaveLength(2));
+  transport.fail(polls[1]!, EventProtocolErrorCode.Forbidden);
+  await expect(watch.closed).rejects.toMatchObject({code: EventProtocolErrorCode.Forbidden});
+  await expect(watch.ready).resolves.toBeUndefined();
+  expect(observations).toContainEqual({type: 'status', status: 'stopped'});
+});
+
+it('deduplicates stable event IDs across schema rediscovery and cursor resets', async () => {
+  const {client, transport, polls} = setup();
+  await client.connect();
+  const observed: Observation[] = [];
+  const watch = client.watch(options, value => { observed.push(value); });
+  await vi.waitFor(() => expect(polls).toHaveLength(1));
+  transport.respond(polls[0]!, {...batch, events: [event('known')], hasMore: true});
+  await vi.waitFor(() => expect(polls).toHaveLength(2));
+  transport.fail(polls[1]!, EventProtocolErrorCode.Unsupported, {reason: 'schema_changed'});
+  await vi.waitFor(() => expect(polls).toHaveLength(3));
+  expect(polls[2]!.params?.cursor).toBe(null);
+  transport.respond(polls[2]!, {...batch, cursor: 'reset', hasMore: true});
+  await vi.waitFor(() => expect(polls).toHaveLength(4));
+  transport.respond(polls[3]!, {...batch, cursor: 'after', events: [event('known'), event('new')]});
+  await vi.waitFor(() => expect(watch.cursor).toBe('after'));
+  expect(observed.filter(value => value.type === 'event').map(value => value.event.eventId)).toEqual(['known', 'new']);
+  expect(observed.filter(value => value.type === 'gap')).toEqual([{type: 'gap', cursor: null}]);
 });

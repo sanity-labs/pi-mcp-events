@@ -1,9 +1,20 @@
 import {z} from 'zod';
+import {ProtocolErrorCode} from '@modelcontextprotocol/client';
 
 // Pinned draft: https://github.com/modelcontextprotocol/modelcontextprotocol/blob/b0efd116faca84c9caad109ccf0778da4dc49579/seps/0000-events-extension.md
 export const PROTOCOL_VERSION = '2026-07-28';
 export const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
 export const SUBSCRIPTION_ID = 'io.modelcontextprotocol/subscriptionId';
+export const EventProtocolErrorCode = {
+  MethodNotFound: ProtocolErrorCode.MethodNotFound,
+  InvalidParams: ProtocolErrorCode.InvalidParams,
+  InternalError: ProtocolErrorCode.InternalError,
+  NotFound: -32023,
+  Forbidden: -32024,
+  ResourceExhausted: -32025,
+  Unsupported: -32026,
+  CallbackEndpointError: -32027,
+} as const;
 export const clientInfo = {name: 'pi-mcp-events', version: '0.0.0'};
 export const clientCapabilities = {extensions: {[EVENTS_EXTENSION]: {}}};
 export const record = z.record(z.string(), z.unknown());
@@ -52,9 +63,9 @@ export const errorNotification = z.object({error: remoteError});
 
 export class EventProtocolError extends Error {
   readonly code: number;
-  readonly data?: Record<string, unknown>;
-  constructor(error: z.infer<typeof remoteError>) {
-    super(error.message);
+  readonly data?: unknown;
+  constructor(error: {code: number; message: string; data?: unknown}, options?: ErrorOptions) {
+    super(error.message, options);
     this.name = 'EventProtocolError';
     this.code = error.code;
     this.data = error.data;

@@ -1,9 +1,12 @@
-import {setTimeout as sleep} from 'node:timers/promises';
+import {ProtocolError, SdkError, SdkErrorCode, type StandardSchemaV1} from '@modelcontextprotocol/client';
+import delay from 'delay';
 import {z} from 'zod';
 import {
-  canonical, catalogResult, EventProtocolError, pollResult,
+  canonical, catalogResult, EventProtocolError, EventProtocolErrorCode, pollResult,
   type EventDescriptor, type EventOccurrence,
 } from './protocol.ts';
+import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
+import {retryOperation} from './retry.ts';
 import {EventContract} from './validation.ts';
 import {EventsWire} from './wire.ts';
 
@@ -30,31 +33,43 @@ export type ClientOptions = {
   pollFloorMs?: number;
   retryMs?: number;
   maxRetries?: number;
+  maxSubscriptions?: number;
+  maxCatalogEntries?: number;
+  maxCatalogPages?: number;
+  maxPollBytes?: number;
+  maxTrackedEventIds?: number;
 };
 const watchSchema = z.object({
   name: z.string().min(1), arguments: z.record(z.string(), z.unknown()),
   mode: z.literal('poll'), cursor: z.string().nullable().optional(),
-  maxAgeMs: z.number().int().nonnegative().optional(), maxEvents: z.number().int().positive().optional(),
+  maxAgeMs: z.number().int().nonnegative().optional(), maxEvents: z.number().int().positive().default(50),
 });
 const clientSchema = z.object({
-  pollFloorMs: z.number().int().positive().max(2 ** 31 - 1).default(1000),
+  pollFloorMs: z.number().int().positive().default(1000),
   retryMs: z.number().int().positive().max(30_000).default(1000),
   maxRetries: z.number().int().nonnegative().default(10),
+  maxSubscriptions: z.number().int().positive().default(32),
+  maxCatalogEntries: z.number().int().positive().default(1000),
+  maxCatalogPages: z.number().int().positive().default(100),
+  maxPollBytes: z.number().int().positive().default(256 * 1024),
+  maxTrackedEventIds: z.number().int().positive().default(4096),
 });
 
-function remoteCode(error: unknown): number | undefined {
-  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
-  return typeof error.code === 'number' ? error.code : undefined;
-}
 function needsRediscovery(error: unknown): boolean {
-  const code = remoteCode(error);
-  if (code === -32023) return true;
-  if (code !== -32026 || typeof error !== 'object' || error === null || !('data' in error)) return false;
+  if (!(error instanceof EventProtocolError)) return false;
+  if (error.code === EventProtocolErrorCode.NotFound) return true;
   const data = error.data;
-  return typeof data === 'object' && data !== null && 'reason' in data && data.reason === 'schema_changed';
+  return error.code === EventProtocolErrorCode.Unsupported
+    && typeof data === 'object' && data !== null && 'reason' in data && data.reason === 'schema_changed';
 }
-function fatal(error: unknown): boolean {
-  return [-32601, -32602, -32023, -32024, -32026].includes(remoteCode(error) ?? 0);
+
+function normalizeRequestError(error: unknown) {
+  if (error instanceof EventsClientError || error instanceof EventProtocolError) return error;
+  if (error instanceof ProtocolError) return new EventProtocolError(error, {cause: error});
+  if (error instanceof SdkError && error.code === SdkErrorCode.InvalidResult) {
+    return new EventsClientError(ErrorCode.InvalidResponse, 'Invalid MCP Events response', {cause: error});
+  }
+  return new EventsClientError(ErrorCode.RequestFailed, 'MCP Events request failed', {cause: error});
 }
 
 export class EventsClient {
@@ -67,158 +82,150 @@ export class EventsClient {
 
   constructor(wire: EventsWire, settings: ClientOptions = {}) {
     this.wire = wire;
-    this.settings = clientSchema.parse(settings);
+    const parsed = clientSchema.safeParse(settings);
+    if (!parsed.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid MCP Events client options', {cause: parsed.error});
+    this.settings = parsed.data;
   }
   async connect() {
-    await this.wire.connect(this.lifetime.signal);
+    this.assertOpen();
+    try { await this.wire.connect(this.lifetime.signal); }
+    catch (error) {
+      this.lifetime.signal.throwIfAborted();
+      if (error instanceof ProtocolError || error instanceof EventProtocolError) throw normalizeRequestError(error);
+      throw new EventsClientError(ErrorCode.ConnectionFailed, 'MCP Events connection failed', {cause: error});
+    }
     await this.refresh();
   }
   list() { return [...this.contracts.values()].map(contract => contract.descriptor); }
   refresh(): Promise<EventDescriptor[]> {
     if (this.refreshing) return this.refreshing;
-    const run = async () => {
-      const contracts = new Map<string, EventContract>();
-      const cursors = new Set<string>();
-      let cursor: string | undefined;
-      do {
-        const result = await this.wire.request('events/list', cursor === undefined ? {} : {cursor}, catalogResult, {signal: this.lifetime.signal});
-        for (const descriptor of result.events) {
-          if (contracts.has(descriptor.name)) throw new Error('Duplicate event name in catalog');
-          if (contracts.size >= 1000) throw new Error('Event catalog exceeds 1000 descriptors');
-          contracts.set(descriptor.name, new EventContract(descriptor));
-        }
-        cursor = result.nextCursor;
-        if (cursor !== undefined) {
-          if (cursors.has(cursor) || cursors.size >= 100) throw new Error('Event catalog pagination did not terminate');
-          cursors.add(cursor);
-        }
-      } while (cursor !== undefined);
-      this.contracts = contracts;
-      return this.list();
-    };
-    this.refreshing = run().finally(() => { this.refreshing = undefined; });
+    this.refreshing = this.readCatalog().finally(() => { this.refreshing = undefined; });
     return this.refreshing;
+  }
+  private async request<S extends StandardSchemaV1>(method: string, params: Record<string, unknown>, schema: S, signal: AbortSignal) {
+    this.assertOpen();
+    try { return await this.wire.request(method, params, schema, {signal}); }
+    catch (error) { signal.throwIfAborted(); throw normalizeRequestError(error); }
+  }
+  private async readCatalog() {
+    const contracts = new Map<string, EventContract>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      if (pages++ >= this.settings.maxCatalogPages) throw limitExceeded('maxCatalogPages', this.settings.maxCatalogPages);
+      const result = await this.request('events/list', cursor === undefined ? {} : {cursor}, catalogResult, this.lifetime.signal);
+      for (const descriptor of result.events) {
+        if (contracts.has(descriptor.name)) throw new EventsClientError(ErrorCode.InvalidCatalog, 'Duplicate event name in catalog', {details: {name: descriptor.name}});
+        if (contracts.size >= this.settings.maxCatalogEntries) throw limitExceeded('maxCatalogEntries', this.settings.maxCatalogEntries);
+        try { contracts.set(descriptor.name, new EventContract(descriptor)); }
+        catch (error) { throw new EventsClientError(ErrorCode.InvalidCatalog, 'Invalid event schema in catalog', {cause: error, details: {name: descriptor.name}}); }
+      }
+      cursor = result.nextCursor;
+      if (cursor !== undefined && cursors.has(cursor)) throw new EventsClientError(ErrorCode.InvalidCatalog, 'Event catalog pagination repeated a cursor');
+      if (cursor !== undefined) cursors.add(cursor);
+    } while (cursor !== undefined);
+    this.contracts = contracts;
+    return this.list();
+  }
+  private assertOpen() {
+    if (this.lifetime.signal.aborted) throw new EventsClientError(ErrorCode.Closed, 'MCP Events client is closed');
   }
   private contract(options: WatchOptions) {
     const contract = this.contracts.get(options.name);
-    if (!contract) throw new EventProtocolError({code: -32023, message: 'Event is not in the current catalog'});
-    if (!contract.descriptor.delivery.includes(options.mode)) throw new EventProtocolError({code: -32026, message: 'Event does not offer this delivery mode'});
+    if (!contract) throw new EventsClientError(ErrorCode.EventNotFound, 'Event is not in the current catalog', {details: {name: options.name}});
+    if (!contract.descriptor.delivery.includes(options.mode)) throw new EventsClientError(ErrorCode.UnsupportedDeliveryMode, 'Event does not offer this delivery mode', {details: {name: options.name, mode: options.mode}});
     try { contract.arguments(options.arguments); }
-    catch (error) {
-      throw new EventProtocolError({code: -32602, message: error instanceof Error ? error.message : 'Invalid subscription arguments'});
-    }
+    catch (error) { throw new EventsClientError(ErrorCode.InvalidArguments, 'Subscription arguments do not match inputSchema', {cause: error}); }
     return contract;
   }
-  watch(options: WatchOptions, accept: (observation: Observation) => Promise<void> | void, checkpoint?: (cursor: string | null) => Promise<void> | void): Watch {
-    options = watchSchema.parse(options);
+  watch(input: WatchOptions, accept: (observation: Observation) => Promise<void> | void, checkpoint?: (cursor: string | null) => Promise<void> | void): Watch {
+    this.assertOpen();
+    const parsed = watchSchema.safeParse(input);
+    if (!parsed.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid event watch options', {cause: parsed.error});
+    const options = parsed.data;
     this.contract(options);
-    if (this.lifetime.signal.aborted) throw new Error('MCP Events client is closed');
-    const key = canonical([options.name, options.arguments, options.mode]);
-    if (this.watches.has(key)) throw new Error('This subscription is already running');
-    if (this.watches.size >= 32) throw new Error('At most 32 event subscriptions may run per server');
+    let key: string;
+    try { key = canonical([options.name, options.arguments, options.mode]); }
+    catch (error) { throw new EventsClientError(ErrorCode.InvalidArguments, 'Event arguments must be JSON values', {cause: error}); }
+    if (this.watches.has(key)) throw new EventsClientError(ErrorCode.AlreadyWatching, 'This subscription is already running');
+    if (this.watches.size >= this.settings.maxSubscriptions) throw limitExceeded('maxSubscriptions', this.settings.maxSubscriptions);
     const local = new AbortController();
     const signal = AbortSignal.any([local.signal, this.lifetime.signal]);
     const ready = Promise.withResolvers<void>();
     void ready.promise.catch(() => {});
     let cursor = options.cursor ?? null;
-    let failures = 0;
     const seen = new Set<string>();
-    const emit = async (event: EventOccurrence) => {
-      this.contract(options).event(event);
-      if (!seen.has(event.eventId)) {
-        await accept({type: 'event', event});
-        failures = 0;
-        seen.add(event.eventId);
-        if (seen.size > 4096) seen.delete(seen.values().next().value!);
-      }
-    };
-    const advance = async (next: string | null) => {
-      signal.throwIfAborted();
-      await checkpoint?.(next);
-      cursor = next;
-    };
-    const params = () => ({
-      name: options.name, arguments: options.arguments, cursor,
-      ...(options.maxAgeMs === undefined ? {} : {maxAgeMs: options.maxAgeMs}),
-    });
-    const status = async (value: Extract<Observation, {type: 'status'}>['status']) => {
+    const status = async (value: 'retrying' | 'stopped') => {
       try { await accept({type: 'status', status: value}); }
       catch { /* A full consumer inbox must not prevent delivery retries. */ }
     };
-    const maxEvents = Math.min(options.maxEvents ?? 50, 50);
-    let pendingPoll: {result: z.infer<typeof pollResult>; index: number; gapAccepted: boolean} | undefined;
-    let rediscovery: {gapAccepted: boolean} | undefined;
+    const retry = <T>(operation: () => Promise<T>) => retryOperation(operation, {
+      ...this.settings, signal, onRetry: () => status('retrying'),
+    });
+    const deliver = (observation: Observation) => retry(async () => {
+      try { await accept(observation); }
+      catch (error) { throw new EventsClientError(ErrorCode.ConsumerRejected, 'Event consumer rejected delivery', {cause: error}); }
+    });
+    const advance = async (next: string | null) => {
+      await retry(async () => {
+        try { await checkpoint?.(next); }
+        catch (error) { throw new EventsClientError(ErrorCode.CheckpointFailed, 'Event checkpoint failed', {cause: error}); }
+      });
+      cursor = next;
+    };
+    const rediscover = async () => {
+      await retry(() => this.refresh());
+      this.contract(options);
+      await deliver({type: 'gap', cursor: null});
+      await advance(null);
+    };
+    const fetchPoll = () => retry(() => this.request('events/poll', {
+      name: options.name, arguments: options.arguments, cursor, maxEvents: options.maxEvents,
+      ...(options.maxAgeMs === undefined ? {} : {maxAgeMs: options.maxAgeMs}),
+    }, pollResult, signal));
+    const readPoll = async () => {
+      try { return await fetchPoll(); }
+      catch (error) {
+        if (!needsRediscovery(error)) throw error;
+        await rediscover();
+        return fetchPoll();
+      }
+    };
     const poll = async () => {
       while (!signal.aborted) {
-        if (!pendingPoll) {
-          const result = await this.wire.request('events/poll', {...params(), maxEvents}, pollResult, {signal});
-          if (result.events.length > maxEvents || Buffer.byteLength(JSON.stringify(result)) > 256 * 1024) throw new Error('Poll response exceeds the requested batch or memory limit');
-          pendingPoll = {result, index: 0, gapAccepted: false};
-        }
-        const {result} = pendingPoll;
-        signal.throwIfAborted();
-        if (!pendingPoll.gapAccepted) {
-          if (result.cursor !== null && result.truncated) await accept({type: 'gap', cursor: result.cursor});
-          pendingPoll.gapAccepted = true;
-        }
-        while (pendingPoll.index < result.events.length) {
+        this.contract(options);
+        const result = await readPoll();
+        if (result.events.length > options.maxEvents) throw new EventsClientError(ErrorCode.InvalidResponse, 'Poll response exceeds the requested batch size', {details: {maxEvents: options.maxEvents}});
+        if (Buffer.byteLength(JSON.stringify(result)) > this.settings.maxPollBytes) throw limitExceeded('maxPollBytes', this.settings.maxPollBytes);
+        if (result.cursor !== null && result.truncated) await deliver({type: 'gap', cursor: result.cursor});
+        for (const event of result.events) {
           signal.throwIfAborted();
-          await emit(result.events[pendingPoll.index]!);
-          pendingPoll.index++;
+          try { this.contract(options).event(event); }
+          catch (error) {
+            if (error instanceof EventsClientError) throw error;
+            throw new EventsClientError(ErrorCode.InvalidEvent, 'Event does not match its advertised name or payloadSchema', {cause: error});
+          }
+          if (seen.has(event.eventId)) continue;
+          await deliver({type: 'event', event});
+          seen.add(event.eventId);
+          if (seen.size > this.settings.maxTrackedEventIds) seen.delete(seen.values().next().value!);
         }
         await advance(result.cursor);
-        pendingPoll = undefined;
-        failures = 0;
         ready.resolve();
-        if (!result.hasMore) {
-          let remaining = Math.max(this.settings.pollFloorMs, result.nextPollMs);
-          while (remaining > 0) {
-            const interval = Math.min(remaining, 2 ** 31 - 1);
-            await sleep(interval, undefined, {signal});
-            remaining -= interval;
-          }
-        }
+        if (!result.hasMore) await delay(Math.max(this.settings.pollFloorMs, result.nextPollMs), {signal});
       }
     };
     const run = async () => {
-      try {
-        while (!signal.aborted) {
-          try {
-            if (rediscovery) {
-              await this.refresh();
-              this.contract(options);
-              if (!rediscovery.gapAccepted) {
-                await accept({type: 'gap', cursor: null});
-                rediscovery.gapAccepted = true;
-              }
-              await advance(null);
-              pendingPoll = undefined;
-              rediscovery = undefined;
-            }
-            this.contract(options);
-            await poll();
-          } catch (error) {
-            if (signal.aborted) break;
-            if (needsRediscovery(error)) {
-              if (rediscovery) throw error;
-              rediscovery = {gapAccepted: false};
-            } else if (fatal(error)) throw error;
-            if (failures >= this.settings.maxRetries) throw new Error('Event delivery retry limit reached');
-            await status('retrying');
-            await this.delay(failures++, signal);
-            continue;
-          }
-          failures = 0;
-          if (!signal.aborted) await this.delay(0, signal);
-        }
-      } catch (error) {
+      try { await poll(); }
+      catch (error) {
         if (!signal.aborted) {
           ready.reject(error);
           await status('stopped');
           throw error;
         }
       } finally {
-        ready.reject(new Error('Subscription stopped before becoming active'));
+        ready.reject(new EventsClientError(ErrorCode.Stopped, 'Subscription stopped before becoming active'));
         this.watches.delete(key);
       }
     };
@@ -226,17 +233,18 @@ export class EventsClient {
     void closed.catch(() => {});
     const watch: Watch = {
       options, ready: ready.promise, closed, get cursor() { return cursor; },
-      stop: async () => { local.abort(); await closed.catch(() => {}); },
+      stop: async () => {
+        local.abort(new EventsClientError(ErrorCode.Stopped, 'Event subscription stopped'));
+        await closed.catch(() => {});
+      },
     };
     this.watches.set(key, watch);
     return watch;
   }
-  private delay(failures: number, signal: AbortSignal) {
-    return sleep(Math.min(30_000, this.settings.retryMs * 2 ** Math.min(failures, 5)), undefined, {signal});
-  }
   async close() {
-    this.lifetime.abort();
+    this.lifetime.abort(new EventsClientError(ErrorCode.Closed, 'MCP Events client is closed'));
     await Promise.allSettled([...this.watches.values()].map(watch => watch.stop()));
-    await this.wire.close();
+    try { await this.wire.close(); }
+    catch (error) { throw new EventsClientError(ErrorCode.ConnectionFailed, 'MCP Events connection could not close', {cause: error}); }
   }
 }
