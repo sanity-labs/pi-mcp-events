@@ -6,14 +6,15 @@ import {
   type EventDescriptor, type EventOccurrence,
 } from './protocol.ts';
 import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
-import {retryOperation} from './retry.ts';
+import {retryable, retryOperation} from './retry.ts';
+import {streamEvents} from './stream.ts';
 import {EventContract} from './validation.ts';
 import {EventsWire} from './wire.ts';
 
 export type WatchOptions = {
   name: string;
   arguments: Record<string, unknown>;
-  mode: 'poll';
+  mode: 'poll' | 'push';
   cursor?: string | null;
   maxAgeMs?: number;
   maxEvents?: number;
@@ -21,7 +22,8 @@ export type WatchOptions = {
 export type Observation =
   | {type: 'event'; event: EventOccurrence}
   | {type: 'gap'; cursor: string | null}
-  | {type: 'status'; status: 'retrying' | 'stopped'};
+  | {type: 'status'; status: 'retrying' | 'stopped'}
+  | {type: 'status'; status: 'source-error'; error: EventProtocolError};
 export type Watch = {
   readonly ready: Promise<void>;
   readonly closed: Promise<void>;
@@ -31,6 +33,7 @@ export type Watch = {
 };
 export type ClientOptions = {
   pollFloorMs?: number;
+  heartbeatMs?: number;
   retryMs?: number;
   maxRetries?: number;
   maxSubscriptions?: number;
@@ -41,10 +44,11 @@ export type ClientOptions = {
 };
 const watchSchema = z.object({
   name: z.string().min(1), arguments: z.record(z.string(), z.unknown()),
-  mode: z.literal('poll'), cursor: z.string().nullable().optional(),
+  mode: z.enum(['poll', 'push']), cursor: z.string().nullable().optional(),
   maxAgeMs: z.number().int().nonnegative().optional(), maxEvents: z.number().int().positive().default(50),
 });
 const clientSchema = z.object({
+  heartbeatMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER / 2).default(30_000),
   pollFloorMs: z.number().int().positive().default(1000),
   retryMs: z.number().int().positive().max(30_000).default(1000),
   maxRetries: z.number().int().nonnegative().default(10),
@@ -174,6 +178,17 @@ export class EventsClient {
       });
       cursor = next;
     };
+    const emit = async (event: EventOccurrence) => {
+      try { this.contract(options).event(event); }
+      catch (error) {
+        if (error instanceof EventsClientError) throw error;
+        throw new EventsClientError(ErrorCode.InvalidEvent, 'Event does not match its advertised name or payloadSchema', {cause: error});
+      }
+      if (seen.has(event.eventId)) return;
+      await deliver({type: 'event', event});
+      seen.add(event.eventId);
+      if (seen.size > this.settings.maxTrackedEventIds) seen.delete(seen.values().next().value!);
+    };
     const rediscover = async () => {
       await retry(() => this.refresh());
       this.contract(options);
@@ -201,23 +216,60 @@ export class EventsClient {
         if (result.cursor !== null && result.truncated) await deliver({type: 'gap', cursor: result.cursor});
         for (const event of result.events) {
           signal.throwIfAborted();
-          try { this.contract(options).event(event); }
-          catch (error) {
-            if (error instanceof EventsClientError) throw error;
-            throw new EventsClientError(ErrorCode.InvalidEvent, 'Event does not match its advertised name or payloadSchema', {cause: error});
-          }
-          if (seen.has(event.eventId)) continue;
-          await deliver({type: 'event', event});
-          seen.add(event.eventId);
-          if (seen.size > this.settings.maxTrackedEventIds) seen.delete(seen.values().next().value!);
+          await emit(event);
         }
         await advance(result.cursor);
         ready.resolve();
         if (!result.hasMore) await delay(Math.max(this.settings.pollFloorMs, result.nextPollMs), {signal});
       }
     };
+    const push = async () => {
+      let rediscovered = false;
+      while (!signal.aborted) {
+        await retry(async () => {
+          this.contract(options);
+          let progressed = false;
+          const progress = () => { progressed = true; rediscovered = false; };
+          try {
+            await streamEvents(this.wire, {
+              name: options.name, arguments: options.arguments, cursor,
+              ...(options.maxAgeMs === undefined ? {} : {maxAgeMs: options.maxAgeMs}),
+            }, signal, this.settings.heartbeatMs, {
+              active: async (next, truncated) => {
+                if (next !== null && truncated) await deliver({type: 'gap', cursor: next});
+                await advance(next);
+                ready.resolve();
+              },
+              event: async event => { await emit(event); await advance(event.cursor); progress(); },
+              heartbeat: async next => { await advance(next); progress(); },
+              sourceError: async error => {
+                try { await accept({type: 'status', status: 'source-error', error}); }
+                catch { /* Status delivery must not stop the source. */ }
+              },
+            });
+          } catch (error) {
+            signal.throwIfAborted();
+            const reason = error instanceof EventsClientError && error.code === ErrorCode.SubscriptionTerminated
+              ? error.cause : error;
+            if (needsRediscovery(reason) && !rediscovered) {
+              rediscovered = true;
+              await rediscover();
+              return;
+            }
+            const normalized = normalizeRequestError(error);
+            if (progressed && retryable(normalized) && this.settings.maxRetries > 0) return;
+            throw normalized;
+          }
+        });
+        await status('retrying');
+        await delay(this.settings.retryMs, {signal});
+      }
+    };
     const run = async () => {
-      try { await poll(); }
+      try {
+        if (options.mode === 'poll') await poll();
+        else await push();
+      }
       catch (error) {
         if (!signal.aborted) {
           ready.reject(error);

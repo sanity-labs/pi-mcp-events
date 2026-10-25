@@ -15,6 +15,7 @@ export const EventsClientErrorCode = {
   ConsumerRejected: 'CONSUMER_REJECTED',
   CheckpointFailed: 'CHECKPOINT_FAILED',
   RetryExhausted: 'RETRY_EXHAUSTED',
+  SubscriptionTerminated: 'SUBSCRIPTION_TERMINATED',
 } as const;
 export type EventsClientErrorCode = typeof EventsClientErrorCode[keyof typeof EventsClientErrorCode];
 
