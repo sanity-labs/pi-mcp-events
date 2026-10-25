@@ -1,8 +1,8 @@
 # Pi MCP Events
 
-Bring MCP events into a running [Pi](https://pi.dev) conversation through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it can take a follow-up turn.
+An implementation of the **MCP Events specification draft, [SEP-3415 pinned at `b0efd116`](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/b0efd116faca84c9caad109ccf0778da4dc49579/seps/0000-events-extension.md)**, for [Pi](https://pi.dev). Targets MCP revision `2026-07-28`; compatibility can change as the draft evolves.
 
-**Private pilot.** Access is limited to sanity-labs members. This package is not published to npm. It implements a pinned Events draft; compatibility can change as the draft evolves.
+Receive events through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it can take a follow-up turn.
 
 ## Install
 
@@ -60,7 +60,7 @@ The extension starts configured watches automatically. With no configuration fil
 | `/mcp-events stop changes` | Stop the watch whose configured ID is `changes`. |
 | `/mcp-events stop` | Stop all watches and close the extension's connections. |
 
-Stopped and failed watches remain visible while the extension session is active. Use `/reload` to restart configured watches. An active status reflects the client's latest observation; it does not prove uninterrupted end-to-end delivery.
+Individually stopped and failed watches remain visible while the extension session is active. Stopping all watches clears that session's status. Use `/reload` to restart configured watches. An active status reflects the client's latest observation; it does not prove uninterrupted end-to-end delivery.
 
 ## Configuration
 
@@ -90,7 +90,7 @@ Relative `cwd`, `stateDir`, and TLS file paths resolve from the configuration fi
 | `push` | Server advertises streaming. Receives correlated notifications, checks heartbeat liveness, and reconnects with its cursor. |
 | `webhook` | Server advertises webhooks and can reach your HTTPS callback. Verifies signed requests, renews subscriptions, and attempts unsubscribe during shutdown. |
 
-Set a watch's `maxEvents` to bound requested polling batches (default 50). `ttlMs` requests a lifetime where supported; the server decides the grant. Memory-only sessions request a finite webhook lifetime even if configuration asks for no expiry. Available modes and replay behavior depend on the server's event source.
+Set a watch's `maxEvents` to bound requested polling batches (default 50). `ttlMs` requests a lifetime where supported; the server decides the grant. Memory-only sessions require webhook subscriptions to expire, even if configuration asks for no expiry. Available modes and replay behavior depend on the server's event source.
 
 ### Webhooks
 
@@ -139,7 +139,7 @@ Event payloads become part of Pi's conversation and may be sent to the configure
 
 ## Compatibility and development
 
-Implements [SEP-3415 at `b0efd116`](https://github.com/pja-ant/modelcontextprotocol/blob/b0efd116faca84c9caad109ccf0778da4dc49579/seps/0000-events-extension.md) with MCP revision `2026-07-28`. The package pins its own MCP client dependency and does not require the host to upgrade its MCP SDK. Stock Pi 1.4.0 is the tested host; the wildcard peer dependency is not a claim that every Pi version is qualified.
+The package pins its own MCP client dependency and does not require the host to upgrade its MCP SDK. Stock Pi 1.4.0 is the tested host; the wildcard peer dependency is not a claim that every Pi version is qualified.
 
 ```sh
 npm ci
@@ -150,4 +150,6 @@ Validation runs type checks, unit/protocol tests, a build, and stock-Pi integrat
 
 The package exports the experimental client API from `@sanity-labs/pi-mcp-events`, the observation contract from `/pi`, and the Pi entrypoint from `/extension`. API changes are possible during the pilot. See [the exports](src/index.ts) and [observation contract](src/pi-contract.ts).
 
-Report pilot issues in this private repository with the commit, Pi/Node versions, delivery mode, and redacted status output. Keep credentials, signing secrets, and event payloads out of reports. Public distribution and npm publishing remain disabled pending release review.
+## Feedback
+
+[Open an issue](https://github.com/sanity-labs/pi-mcp-events/issues/new) to report a bug, suggest an improvement, or share feedback.
