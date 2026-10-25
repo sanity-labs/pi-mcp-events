@@ -19,7 +19,7 @@ type SubscriptionOptions = {
 type Callbacks = {
   validate(): void;
   cursor(): string | null;
-  active(cursor: string | null, truncated: boolean): Promise<void>;
+  active(cursor: string | null, truncated: boolean, deliveryStatus?: WebhookDeliveryStatus): Promise<void>;
   event(event: EventOccurrence): Promise<void>;
   gap(cursor: string | null): Promise<void>;
   deliveryStatus(status: WebhookDeliveryStatus): Promise<void>;
@@ -81,7 +81,7 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
       catch (error) { throw new EventsClientError(ErrorCode.InvalidResponse, 'Server changed the webhook subscription ID', {cause: error}); }
       const renewAt = Date.now() + Math.min(remaining * 0.75, options.webhookRefreshMs);
       await enqueue(async () => {
-        await callbacks.active(result.cursor, result.truncated);
+        await callbacks.active(result.cursor, result.truncated, result.deliveryStatus);
         if (result.deliveryStatus) await callbacks.deliveryStatus(result.deliveryStatus);
       });
       await delay(Math.max(0, renewAt - Date.now()), {signal});

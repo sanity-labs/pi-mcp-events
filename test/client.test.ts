@@ -31,6 +31,21 @@ function setup(settings: ClientOptions = {}) {
 }
 
 describe('event discovery', () => {
+  it('reports starting, retrying, quiet recovery, and stopped through the watch', async () => {
+    const {client, transport, polls} = setup();
+    await client.connect();
+    const watch = client.watch(options, () => {});
+    expect(watch.status).toBe('starting');
+    await vi.waitFor(() => expect(polls).toHaveLength(1));
+    transport.fail(polls[0]!, -32603);
+    await vi.waitFor(() => expect(polls).toHaveLength(2));
+    expect(watch.status).toBe('retrying');
+    transport.respond(polls[1]!, batch);
+    await watch.ready;
+    expect(watch.status).toBe('active');
+    await watch.stop();
+    expect(watch.status).toBe('stopped');
+  });
   it('publishes a complete paginated catalog and shares concurrent refreshes', async () => {
     const {client, transport} = setup();
     await client.connect();
@@ -200,6 +215,7 @@ describe('poll delivery', () => {
     transport.handle = request => { requests++; transport.fail(request, -32603); };
     const watch = client.watch(options, () => {});
     await expect(watch.closed).rejects.toThrow('retry limit');
+    expect(watch.status).toBe('stopped');
     expect(requests).toBe(3);
     await client.watch(options, () => {}).stop();
   });

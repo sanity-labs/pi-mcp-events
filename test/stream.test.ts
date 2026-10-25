@@ -39,6 +39,30 @@ function setup(settings: ClientOptions = {}) {
 }
 
 describe('event streaming', () => {
+  it('clears retrying on a quiet reconnection and on heartbeat checkpoint recovery', async () => {
+    const {client, transport, requests, active, disconnect} = setup();
+    await client.connect();
+    let checkpoints = 0;
+    const watch = client.watch(options, () => {}, cursor => {
+      if (cursor === 'heartbeat' && ++checkpoints === 1) throw new Error('temporarily unavailable');
+    });
+    expect(watch.status).toBe('starting');
+    await flush(); active(requests[0]!); await watch.ready;
+    expect(watch.status).toBe('active');
+    disconnect(requests[0]!);
+    await flush();
+    expect(watch.status).toBe('retrying');
+    await vi.advanceTimersByTimeAsync(10);
+    active(requests[1]!); await flush();
+    expect(watch.status).toBe('active');
+    transport.notify(requests[1]!, 'heartbeat', {cursor: 'heartbeat'});
+    await flush();
+    expect(watch.status).toBe('retrying');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(watch.status).toBe('active');
+    await watch.stop();
+    expect(watch.status).toBe('stopped');
+  });
   it('demultiplexes watches, deduplicates per subscription, and cancels only the stopped stdio stream', async () => {
     const {client, transport, requests, active} = setup();
     await client.connect();
