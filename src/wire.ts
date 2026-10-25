@@ -23,6 +23,7 @@ function applyResponseLimits(state: HttpState, limits?: ResponseLimits) {
 }
 
 export function nameHeader(name: string): string {
+  // eslint-disable-next-line no-control-regex -- HTTP field values allow horizontal tabs.
   if (name.length > 0 && name.trim() === name && /^[\x09\x20-\x7e]+$/.test(name)
     && !(name.startsWith('=?base64?') && name.endsWith('?='))) return name;
   return `=?base64?${Buffer.from(name).toString('base64')}?=`;

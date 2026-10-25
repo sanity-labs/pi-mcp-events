@@ -1,0 +1,67 @@
+name: Publish package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact reviewed package version
+        required: true
+        type: string
+      tag:
+        description: npm distribution tag
+        required: true
+        default: latest
+        type: choice
+        options: [latest, alpha]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'sanity-labs/pi-mcp-events' &&
+      github.ref == 'refs/heads/main' &&
+      !github.event.repository.private &&
+      vars.ENABLE_NPM_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+          registry-url: https://registry.npmjs.org
+      - name: Check release identity
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          assert.equal(pkg.name, '@sanity-labs/pi-mcp-events');
+          assert.notEqual(pkg.private, true, 'Remove the private flag through a reviewed release PR first');
+          assert.equal(pkg.version, process.env.RELEASE_VERSION, 'Publish only the reviewed version');
+          assert.ok(['latest', 'alpha'].includes(process.env.RELEASE_TAG));
+          assert.equal(pkg.version.includes('-'), process.env.RELEASE_TAG === 'alpha', 'Use alpha for prereleases and latest for stable versions');
+          assert.equal(pkg.publishConfig.access, 'public');
+          JS
+      - run: npm ci
+      - run: npm run validate
+      - run: npm audit --audit-level=high
+      - name: Publish with provenance
+        run: |
+          unset NODE_AUTH_TOKEN
+          npm publish --provenance --access public --tag "$RELEASE_TAG"

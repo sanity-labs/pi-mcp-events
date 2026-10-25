@@ -446,7 +446,7 @@ test('Pi reports an active webhook after a refresh reactivates suspended deliver
 test('saved Pi session renews the same no-expiry webhook after a crash', {timeout: 60_000}, async t => {
   const h = await setup(t, {ephemeral: false, noExpiryWebhooks: true,
     configure: config => ({...config, client: {...config.client, webhookRefreshMs: 100}})});
-  let rpc = await h.start();
+  const rpc = await h.start();
   writeFileSync(h.release, 'continue'); await ordinaryTool(rpc);
   const sessionFile = (await rpc.getState()).sessionFile; assert.ok(sessionFile);
   const initial = h.fixture.requests.find(r => r.method === 'events/subscribe').params;
@@ -454,7 +454,7 @@ test('saved Pi session renews the same no-expiry webhook after a crash', {timeou
   await h.crash();
   assert.equal(h.fixture.stats().webhooks, 1, 'remote no-expiry subscription survives the crash');
   const before = h.fixture.requests.filter(r => r.method === 'events/subscribe').length;
-  rpc = await h.start(sessionFile);
+  await h.start(sessionFile);
   await until(() => h.fixture.requests.filter(r => r.method === 'events/subscribe').length > before, 'resumed webhook renewal');
   const resumed = h.fixture.requests.filter(r => r.method === 'events/subscribe').at(-1).params;
   assert.deepEqual(resumed.delivery, initial.delivery, 'callback URL and signing secret survive restart');
