@@ -1,4 +1,7 @@
 export const EventsClientErrorCode = {
+  InvalidConfiguration: 'INVALID_CONFIGURATION',
+  ConfigurationReadFailed: 'CONFIGURATION_READ_FAILED',
+  MissingEnvironmentVariable: 'MISSING_ENVIRONMENT_VARIABLE',
   InvalidOptions: 'INVALID_OPTIONS',
   InvalidCatalog: 'INVALID_CATALOG',
   InvalidArguments: 'INVALID_ARGUMENTS',
