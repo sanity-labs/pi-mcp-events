@@ -1,10 +1,11 @@
 # Pi MCP Events
 
-An implementation of the **MCP Events specification draft, [SEP-3415 pinned at `b0efd116`](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/b0efd116faca84c9caad109ccf0778da4dc49579/seps/0000-events-extension.md)**, for [Pi](https://pi.dev). Targets MCP revision `2026-07-28`; compatibility can change as the draft evolves. Receive events through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it's ready follow-up turn.
+An implementation of the **MCP Events specification draft, [SEP-3415 pinned at `b0efd116`](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/b0efd116faca84c9caad109ccf0778da4dc49579/seps/0000-events-extension.md)**, for [Pi](https://pi.dev). Targets MCP revision `2026-07-28`; compatibility can change as the draft evolves. Receive events through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it's ready for a follow-up turn.
 
 ## Requirements
 
 - Node.js v24+
+- An existing Pi installation
 - To run integration tests: `openssl`
 
 ## Install
@@ -52,14 +53,14 @@ Replace the example URL, event name, and arguments with values from your MCP ser
 
 ### Configuring events subscriptions
 
-The extension starts configured watches automatically. With no configuration file, it stays idle. Set `PI_MCP_EVENTS_CONFIG` to use a different file.
+The extension starts configured watches automatically. With no configuration file, it stays idle. Set `PI_MCP_EVENTS_CONFIG` to use a different file. After changing configuration, run `/reload`.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `/mcp-events` or `/mcp-events status` | Show each watch's server, event, transport, and status, plus persistence mode, state location, and pending count. |
-| `/mcp-events stop <eventId>` | Stop the `<eventId>`-keyed watch. |
+| `/mcp-events stop <watchId>` | Stop the watch with the configured `id` (for example, `changes`). |
 | `/mcp-events stop` | Stop all watches and close the extension's connections. |
 
 Individually stopped and failed watches remain visible while the extension session is active. Stopping all watches clears that session's status. Use `/reload` to restart configured watches.
@@ -152,27 +153,27 @@ See [client options](src/options.ts) and [webhook options](src/webhook.ts) for t
 
 ### Best-effort delivery
 
-Accepted events remain in a bounded inbox (tempfile or in-memory depending on session retention configuration, see below) until handed to Pi's conversation. Duplicate deliveries are suppressed within bounded tracking windows. Crashes, replay gaps, and exhausted limits can still produce duplicates or loss. 
+Accepted events remain in a bounded inbox, saved to disk or held in memory, until handed to Pi's conversation. Duplicate deliveries are suppressed within bounded tracking windows. Crashes, replay gaps, and exhausted limits can still produce duplicates or loss.
 
 >Conversation handoff is not a guarantee that Pi has flushed the transcript to disk or completed an action.
 
 ### Session persistence
 
-### Agent-directory state file
+#### Agent-directory state file
 
 Saved sessions keep event state under Pi's agent directory, normally `~/.pi/agent/mcp-events`. `PI_CODING_AGENT_DIR` changes that base directory. Set top-level `stateDir` for a separate location: `/mcp-events status` shows the resolved path. Use one process per saved session/state file.
 
-### In-memory via `--no-session`
+#### In-memory via `--no-session`
 
 With `--no-session`, event state stays in memory. Reconnects retain progress during the active session. Session replacement or process exit discards pending events and cursors. Subscriptions stop with the active session. After a crash, remote webhook subscriptions expire according to their finite server grant. Existing state files are left untouched.
 
-### State file issues and graceful degradation
+#### State file issues and graceful degradation
 
-If state files are corrupt, unreadable, or unwritable, the extension shows one conversation-visible warning and continues in memory where possible. Events history remains in-memory for the duration of the problematic state file session: for example, if state file or `stateDir` permissions are at fault, fixing them does **not** take effect until the next session. Old disk state can replay after restart, and new state is not backfilled by default.
+If state files are corrupt, unreadable, or unwritable, the extension shows one conversation-visible warning and continues in memory where possible. Pending events and resume progress remain in memory for the duration of the problematic state file session: for example, if state file or `stateDir` permissions are at fault, fixing them does **not** take effect until the next session. Old disk state can replay after restart, and new state is not backfilled.
 
->`pi-mcp-events` fails open by default: ordinary Pi tools should remain usable event when extension dependencies fail.
+>`pi-mcp-events` fails open by default: ordinary Pi tools should remain usable even when extension dependencies fail.
 
-### Events retention respects model provider configuration
+### Event data and model providers
 
 Event payloads become part of Pi's conversation and may be sent to the configured model provider. **Saved sessions also persist events locally, just as ordinary session turns preserve user/assistant messages.** Choose subscriptions and a model appropriate for that data.
 
