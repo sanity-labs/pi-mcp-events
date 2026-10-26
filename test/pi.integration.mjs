@@ -2,15 +2,12 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {dirname, join, resolve} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {test} from 'node:test';
-import {RpcClient} from '@earendil-works/pi-coding-agent';
+import {cliPath, modelPath, root, RpcClient} from './fixtures/installed-package.mjs';
 import {startFixture} from './fixtures/events-server.mjs';
 
-const root = resolve(import.meta.dirname, '..');
-const cliPath = join(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))), 'bundle/cli.js');
 const modes = ['poll', 'push', 'webhook'];
 async function until(check, description) {
   const deadline = Date.now() + 15_000;
@@ -37,6 +34,9 @@ function files(path) {
 async function setup(t, {ephemeral = true, override = true, blocked = false, configure = config => config} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-events-cli-'));
   const agentDir = join(directory, 'agent'); mkdirSync(agentDir);
+  execFileSync(process.execPath, [cliPath, 'install', root], {
+    cwd: directory, env: {...process.env, PI_CODING_AGENT_DIR: agentDir}, stdio: 'pipe', timeout: 30_000,
+  });
   const key = join(directory, 'key.pem'); const cert = join(directory, 'cert.pem');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'], {stdio: 'ignore'});
   const fixture = await startFixture({key: readFileSync(key), cert: readFileSync(cert)});
@@ -58,8 +58,8 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, con
   const start = async sessionFile => {
     rpc = new RpcClient({cliPath, cwd: directory, provider: 'events-test', model: 'local',
       env: {PI_CODING_AGENT_DIR: agentDir, PI_MCP_EVENTS_CONFIG: configPath, EVENTS_TEST_CONTEXTS: contexts, EVENTS_TEST_OBSERVATIONS: acceptedPath, EVENTS_TEST_RELEASE: release},
-      args: ['--offline', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-context-files', '--tools', 'read',
-        '-e', root, '-e', join(root, 'test/fixtures/pi-model.mjs'),
+      args: ['--offline', '--no-skills', '--no-prompt-templates', '--no-context-files', '--tools', 'read',
+        '-e', modelPath,
         ...(ephemeral ? ['--no-session'] : ['--session-dir', join(directory, 'sessions')]), ...(sessionFile ? ['--session', sessionFile] : [])],
     });
     await rpc.start();
