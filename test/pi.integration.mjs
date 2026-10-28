@@ -18,6 +18,13 @@ async function until(check, description) {
   assert.fail(`Timed out: ${description}`);
 }
 const batches = messages => messages.filter(message => message.role === 'custom' && message.customType === 'mcp-events');
+async function watchStatus(rpc) {
+  const statuses = async () => (await rpc.getMessages()).filter(message => message.customType === 'mcp-events-status' && message.content.startsWith('MCP Events:'));
+  const before = (await statuses()).length;
+  await rpc.prompt('/mcp-events status');
+  await until(async () => (await statuses()).length > before, 'fresh watch status');
+  return (await statuses()).at(-1).content;
+}
 async function ordinaryTool(rpc) {
   await rpc.prompt('READ_TEST', undefined, 'followUp');
   await until(async () => (await rpc.getMessages()).some(message => message.role === 'toolResult' && message.toolName === 'read' && !message.isError && JSON.stringify(message.content).includes('ordinary tool use still works')), 'ordinary tool result');
@@ -109,11 +116,7 @@ test('subscription status identifies each watch and retains stopped and failed w
     ],
   })});
   const rpc = await h.start();
-  const status = async () => {
-    await rpc.prompt('/mcp-events status');
-    const messages = await rpc.getMessages();
-    return messages.filter(message => message.customType === 'mcp-events-status').at(-1)?.content;
-  };
+  const status = () => watchStatus(rpc);
   await until(async () => (await status())?.includes('webhook: active'), 'all watches ready for inspection');
   let content = await status();
   for (const mode of modes) {
@@ -134,8 +137,117 @@ test('subscription status identifies each watch and retains stopped and failed w
   content = await status();
   assert.ok(content.includes('webhook: active'));
   assert.ok(content.includes('1 running watch(es)'));
+  await rpc.prompt('/mcp-events start push');
+  await until(async () => (await status())?.includes('push: active'), 'failed watch starts again and clears its failure');
+  await rpc.prompt('/mcp-events start missing');
+  assert.ok((await status()).includes('missing: could not start'));
+  assert.ok((await status()).includes('2 running watch(es)'));
   await h.shutdown();
 });
+
+test('watch control confirmations reach model context without starting extra turns, including while busy', {timeout: 45_000}, async t => {
+  const h = await setup(t); const rpc = await h.start();
+  const contexts = () => existsSync(h.contexts)
+    ? readFileSync(h.contexts, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+  const messageText = message => typeof message.content === 'string'
+    ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+  const commands = [
+    ['stop push', 'MCP Events watch "push" stopped.'],
+    ['start push', 'MCP Events watch "push" is starting.'],
+    ['start push', 'MCP Events watch "push" is already running.'],
+    ['stop', 'MCP Events subscriptions stopped.'],
+  ];
+  for (const [command, confirmation] of commands) {
+    await rpc.prompt(`/mcp-events ${command}`);
+    await until(async () => (await rpc.getMessages()).some(message => message.customType === 'mcp-events-status' && message.content === confirmation), confirmation);
+  }
+  await delay(200);
+  assert.equal(contexts().length, 0, 'control confirmations do not trigger model turns');
+  await rpc.prompt('CONTROL_CONTEXT_TEST');
+  await until(() => contexts().some(context => JSON.stringify(context.messages.at(-1)?.content).includes('CONTROL_CONTEXT_TEST')), 'control confirmations reach model context');
+  const context = contexts().findLast(context => JSON.stringify(context.messages.at(-1)?.content).includes('CONTROL_CONTEXT_TEST'));
+  const positions = commands.map(([, confirmation]) => context.messages.findIndex(message => messageText(message).includes(confirmation)));
+  assert.ok(positions.every(position => position >= 0));
+  assert.deepEqual(positions, [...positions].sort((a, b) => a - b), 'control confirmations remain in command order');
+  await h.hold();
+  const before = contexts().length;
+  await rpc.prompt('/mcp-events start push');
+  assert.equal(contexts().length, before, 'a confirmation does not interrupt a busy model');
+  writeFileSync(h.release, 'continue');
+  await rpc.prompt('CONTROL_AFTER_BUSY', undefined, 'followUp');
+  await until(() => contexts().some(context => JSON.stringify(context.messages.at(-1)?.content).includes('CONTROL_AFTER_BUSY')), 'busy confirmation reaches next model turn');
+  const afterBusy = contexts().findLast(context => JSON.stringify(context.messages.at(-1)?.content).includes('CONTROL_AFTER_BUSY'));
+  assert.equal(afterBusy.messages.filter(message => messageText(message).includes('MCP Events watch "push" is starting.')).length, 2);
+  await h.shutdown();
+});
+
+for (const ephemeral of [true, false]) {
+  test(`named starts resume watches without restarting others (${ephemeral ? '--no-session' : 'saved session'})`, {timeout: 60_000}, async t => {
+    const h = await setup(t, {ephemeral}); const before = files(h.stateDir); const rpc = await h.start();
+    const status = () => watchStatus(rpc);
+    const delivered = async (watch, value) => until(async () => values(await rpc.getMessages()).some(([id, found]) => id === watch && found === value), `${watch} delivered ${value}`);
+    const starts = () => h.fixture.requests.filter(request => ['events/stream', 'events/subscribe'].includes(request.method)).length;
+    await h.emit(100); await h.received(100);
+    const initial = starts();
+    for (const command of ['start', 'start unknown', ...modes.map(mode => `start ${mode}`)]) await rpc.prompt(`/mcp-events ${command}`);
+    assert.equal(starts(), initial, 'unknown, incomplete, and already-running starts leave watches unchanged');
+    assert.ok((await status()).includes('3 running watch(es)'));
+    for (const [index, mode] of modes.entries()) {
+      const missed = 200 + index; const fresh = 300 + index;
+      await rpc.prompt(`/mcp-events stop ${mode}`);
+      const stopped = await status();
+      assert.ok(stopped.includes(`${mode}: stopped`), stopped);
+      await h.emit(missed);
+      for (const other of modes.filter(candidate => candidate !== mode)) await delivered(other, missed);
+      assert.ok(!values(await rpc.getMessages()).some(([id, value]) => id === mode && value === missed));
+      const since = h.fixture.requests.length; const verifications = h.fixture.stats().verifications;
+      await rpc.prompt(`/mcp-events start ${mode}`);
+      await until(async () => (await status()).includes(`${mode}: active`), `${mode} active again`);
+      const method = {poll: 'events/poll', push: 'events/stream', webhook: 'events/subscribe'}[mode];
+      const resumed = h.fixture.requests.slice(since).find(request => request.method === method);
+      assert.ok(resumed);
+      if (mode === 'webhook') {
+        assert.equal(resumed.params.cursor, null, 'emit-only source starts from now');
+        assert.equal(h.fixture.stats().verifications, verifications + 1, 'new callback verifies before delivery');
+        if (ephemeral) assert.notEqual(resumed.params.ttlMs, null, 'ephemeral webhook still requests finite expiry');
+      } else {
+        assert.notEqual(resumed.params.cursor, null, 'retained cursor resumes the stopped watch');
+        await delivered(mode, missed);
+      }
+      await h.emit(fresh); await h.received(fresh);
+      assert.equal(values(await rpc.getMessages()).filter(([id, value]) => id === mode && value === fresh).length, 1);
+      if (mode === 'webhook') assert.ok(!values(await rpc.getMessages()).some(([id, value]) => id === mode && value === missed));
+    }
+    await rpc.prompt('/mcp-events stop');
+    await until(() => h.fixture.stats().streams === 0 && h.fixture.stats().webhooks === 0, 'stop all closes remote subscriptions');
+    const stopped = await status();
+    assert.ok(stopped.includes('0 running watch(es)'));
+    for (const mode of modes) assert.ok(stopped.includes(`${mode}: stopped`));
+    const polls = h.fixture.requests.filter(request => request.method === 'events/poll').length;
+    await delay(1100);
+    assert.equal(h.fixture.requests.filter(request => request.method === 'events/poll').length, polls);
+    await h.emit(400);
+    const streams = h.fixture.requests.filter(request => request.method === 'events/stream').length;
+    await Promise.all([rpc.prompt('/mcp-events start push'), rpc.prompt('/mcp-events start push')]);
+    await delivered('push', 400);
+    assert.equal(h.fixture.requests.filter(request => request.method === 'events/stream').length, streams + 1, 'concurrent named starts create one stream');
+    assert.equal(h.fixture.requests.filter(request => request.method === 'events/poll').length, polls, 'other watches stay stopped');
+    assert.equal(h.fixture.stats().webhooks, 0);
+    await rpc.prompt('/mcp-events start poll'); await rpc.prompt('/mcp-events start webhook');
+    await until(async () => (await status()).includes('webhook: active'), 'webhook receiver reopens after stop all');
+    await h.emit(401); await h.received(401);
+    await h.hold(); await h.emit(500); await h.accepted(500);
+    await rpc.prompt('/mcp-events stop');
+    writeFileSync(h.release, 'continue');
+    await h.received(500);
+    await ordinaryTool(rpc);
+    if (ephemeral) {
+      assert.equal((await rpc.getState()).sessionFile, undefined);
+      assert.deepEqual(files(h.stateDir), before, 'named starts do not write event state in --no-session');
+    }
+    await h.shutdown();
+  });
+}
 
 for (const override of [false, true]) {
   test(`stock Pi --no-session: all transports, busy delivery, reconnect, fresh sessions, cleanup (${override ? 'stateDir' : 'Pi agent directory'})`, {timeout: 60_000}, async t => {

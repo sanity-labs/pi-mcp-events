@@ -60,10 +60,11 @@ The extension starts configured watches automatically. With no configuration fil
 | Command | What it does |
 | --- | --- |
 | `/mcp-events` or `/mcp-events status` | Show each watch's server, event, transport, and status, plus persistence mode, state location, and pending count. |
+| `/mcp-events start <watchId>` | Start a stopped or failed configured watch without restarting other watches. Starting a running watch has no effect. |
 | `/mcp-events stop <watchId>` | Stop the watch with the configured `id` (for example, `changes`). |
 | `/mcp-events stop` | Stop all watches and close the extension's connections. |
 
-Individually stopped and failed watches remain visible while the extension session is active. Stopping all watches clears that session's status. Use `/reload` to restart configured watches.
+Stopped and failed watches remain visible for the active Pi session, including after stopping all watches. Use `/mcp-events start <watchId>` to start one again with its retained cursor. Replay depends on the server and available history; missed events may be unavailable or reported as a gap. Webhook watches subscribe again and renew under the server's granted lifetime. Use `/reload` to reread configuration and restart all configured watches.
 
 ## Configuration
 
