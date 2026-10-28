@@ -22,6 +22,84 @@ pi install "$PWD"
 - To update, pull the reviewed changes and run `npm ci` again. 
 - To remove `pi-mcp-events`, run `pi remove /absolute/path/to/pi-mcp-events`.
 
+## Try the demo
+
+`pi-mcp-events` comes with a built-in MCP Events-enabled server that emits weather events. To try it out:
+
+### Start the demo server
+
+From this checkout:
+
+```sh
+npm run dev:weather
+```
+
+It serves `http://127.0.0.1:3015/mcp` and simulates weather on a fictional island. Harbor and Hilltop follow different timelines through clouds, rain, a storm, and recovery. Readings arrive in bursts of one to three, with random pauses of 10–20 seconds. The first storm warning arrives after 20 seconds; warnings and all-clears then alternate between the stations every 45 seconds. Each warning stays active for 90 seconds, and the weather cycle repeats every three minutes.
+
+### Add the presenter prompt
+
+Open another terminal and start Pi in a fresh scratch folder:
+
+```sh
+demo_dir=$(mktemp -d)
+cd "$demo_dir"
+pi
+```
+
+Without `.pi/mcp-events.json`, the extension stays idle. The `pi install` step above makes it available here.
+
+Submit this prompt before turning on the feed:
+
+```text
+You are the island's radio presenter. Give brief updates when weather conditions change,
+and announce storm warnings and all-clears. Skip routine readings.
+I'll enable the weather feed next. Wait for its events.
+```
+
+### Turn on MCP Events
+
+Paste this shell command into Pi to create the config:
+
+```sh
+!mkdir -p .pi && cat > .pi/mcp-events.json <<'JSON'
+{
+  "servers": {
+    "weather": {"transport": "http", "url": "http://127.0.0.1:3015/mcp"}
+  },
+  "watches": [
+    {"id": "readings", "server": "weather", "name": "weather.reading", "mode": "push"},
+    {"id": "alerts", "server": "weather", "name": "weather.alert", "mode": "poll"}
+  ]
+}
+JSON
+```
+
+Submit `/reload` on its own in the same Pi conversation:
+
+```text
+/reload
+```
+
+After reload completes, check the watches with a separate command:
+
+```text
+/mcp-events status
+```
+
+| Event | Payload |
+| --- | --- |
+| `weather.reading` | Station, condition, temperature (°C), wind (km/h), rain (mm/h), and daylight. |
+| `weather.changed` | Current reading and previous condition. |
+| `weather.alert` | Current reading, a storm warning message, and `raised` or `cleared` status. |
+
+All three support `poll` and `push`, with optional `"arguments": {"stationId": "harbor"}` or `"arguments": {"stationId": "hilltop"}` to follow one station. Change the configuration and `/reload` to try another event or mode. Replay keeps the last 1,000 events in memory; stale or pre-restart cursors report a gap.
+
+To trigger events yourself, start with `npm run dev:weather -- --interval 0`, then advance one reading at a time, alternating Harbor and Hilltop:
+
+```sh
+curl -X POST http://127.0.0.1:3015/advance -H 'Content-Type: application/json' -d '{}'
+```
+
 ## Getting started
 
 Create `.pi/mcp-events.json` in the project where you run Pi:
