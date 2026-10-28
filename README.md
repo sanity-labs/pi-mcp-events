@@ -65,8 +65,6 @@ The extension starts configured watches automatically. With no configuration fil
 
 Individually stopped and failed watches remain visible while the extension session is active. Stopping all watches clears that session's status. Use `/reload` to restart configured watches.
 
-Event batches show a compact preview of up to three observations. Delivery gaps and warning statuses remain visible even when later observations are hidden. Use Pi's expand-tool-output shortcut (Ctrl+O by default) to view the complete message. This only changes the terminal display: the model and saved sessions still receive the full event data.
-
 ## Configuration
 
 Each watch needs 
