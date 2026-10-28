@@ -38,6 +38,7 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@types/node": "24.10.1",
     "fast-check": "4.10.2",
     "typescript": "6.0.3",
@@ -64,7 +65,8 @@
     "url": "git+https://github.com/sanity-labs/pi-mcp-events.git"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "pi": {
     "extensions": [
