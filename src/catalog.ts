@@ -2,6 +2,7 @@ import delay from 'delay';
 import {z} from 'zod';
 import {EventsClientError, EventsClientErrorCode as ErrorCode} from './errors.ts';
 import {normalizeRequestError} from './request-error.ts';
+import {EventNotification} from './protocol.ts';
 import {retryable, retryOperation} from './retry.ts';
 import type {EventsWire} from './wire.ts';
 
@@ -47,7 +48,7 @@ export function listenCatalog(wire: EventsWire, options: CatalogOptions) {
               return;
             }
             if (!acknowledged) throw new EventsClientError(ErrorCode.InvalidResponse, 'Catalog notification arrived before acknowledgement');
-            if (method !== 'notifications/events/list_changed') {
+            if (method !== EventNotification.ListChanged) {
               throw new EventsClientError(ErrorCode.InvalidResponse, 'Unexpected notification on catalog stream', {details: {method}});
             }
             await refresh();

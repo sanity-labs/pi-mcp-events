@@ -2,7 +2,7 @@ import delay from 'delay';
 import {z} from 'zod';
 import {EventsClientError, EventsClientErrorCode as ErrorCode} from './errors.ts';
 import {
-  activeNotification, errorNotification, EventProtocolError, heartbeatNotification, occurrence,
+  activeNotification, errorNotification, EventMethod, EventNotification, EventProtocolError, heartbeatNotification, occurrence,
   type EventOccurrence,
 } from './protocol.ts';
 import type {EventsWire} from './wire.ts';
@@ -34,10 +34,10 @@ export async function streamEvents(
   };
   const monitoring = monitor().catch(() => {});
   try {
-    await wire.stream('events/stream', params, streamSignal, async (method, value) => {
+    await wire.stream(EventMethod.Stream, params, streamSignal, async (method, value) => {
       processing = true;
       try {
-        if (method === 'notifications/events/active') {
+        if (method === EventNotification.Active) {
           const message = activeNotification.parse(value);
           await handlers.active(message.cursor, message.truncated);
           active = true;
@@ -46,18 +46,18 @@ export async function streamEvents(
         }
         if (!active) throw new EventsClientError(ErrorCode.InvalidResponse, 'Event stream did not begin with active');
         switch (method) {
-          case 'notifications/events/event':
+          case EventNotification.Event:
             await handlers.event(occurrence.parse(value));
             lastSeen = Date.now();
             return;
-          case 'notifications/events/heartbeat':
+          case EventNotification.Heartbeat:
             await handlers.heartbeat(heartbeatNotification.parse(value).cursor);
             lastSeen = Date.now();
             return;
-          case 'notifications/events/error':
+          case EventNotification.Error:
             await handlers.sourceError(new EventProtocolError(errorNotification.parse(value).error));
             return;
-          case 'notifications/events/terminated':
+          case EventNotification.Terminated:
             throw new EventsClientError(ErrorCode.SubscriptionTerminated, 'Event subscription terminated by the server', {
               cause: new EventProtocolError(errorNotification.parse(value).error),
             });
