@@ -14,10 +14,12 @@ import {EventsWire} from './wire.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 type SessionWatch = Pick<WatchOptions, 'name' | 'mode'> & {
-  server: string; watch?: Watch; failure?: 'connection failed' | 'could not start' | 'failed';
+  server: string; watch?: Watch; start?: () => Promise<void>; starting?: Promise<void>;
+  failure?: 'connection failed' | 'could not start' | 'failed';
 };
 type ActiveSession = {
-  closed: boolean; clients: EventsClient[]; watches: Map<string, SessionWatch>;
+  closed: boolean; clients: Map<string, {client: EventsClient; ready: Promise<void>}>; watches: Map<string, SessionWatch>;
+  stopping?: Promise<void>;
   state?: SessionState; delivery?: ConversationDelivery; receiver?: WebhookReceiver; path?: string;
 };
 
@@ -28,21 +30,32 @@ export default function mcpEvents(pi: ExtensionAPI) {
     try { pi.sendMessage({customType: STATUS_MESSAGE_TYPE, display: true, content}, {triggerTurn: false}); }
     catch { /* Reporting must not interrupt ordinary Pi use. */ }
   };
+  const closeConnections = (session: ActiveSession): Promise<void> => {
+    if (session.stopping) return session.stopping;
+    const clients = [...session.clients.values()];
+    session.clients.clear();
+    const receiver = session.receiver;
+    session.receiver = undefined;
+    session.stopping = (async () => {
+      await Promise.allSettled(clients.map(({client}) => client.close()));
+      try { await receiver?.close(); }
+      catch { /* Finite webhook grants expire if eager cleanup cannot complete. */ }
+    })().finally(() => { session.stopping = undefined; });
+    return session.stopping;
+  };
   const stop = async () => {
     const session = active;
     active = undefined;
     if (!session) return;
     session.closed = true;
     session.delivery?.close();
-    await Promise.allSettled(session.clients.map(client => client.close()));
-    try { await session.receiver?.close(); }
-    catch { /* Clients already attempted unsubscribe; shutdown must continue. */ }
+    await closeConnections(session);
   };
   const start = async (ctx: ExtensionContext) => {
     await stop();
     const configPath = resolve(process.env.PI_MCP_EVENTS_CONFIG ?? join(ctx.cwd, '.pi', 'mcp-events.json'));
     if (!existsSync(configPath)) return;
-    const session: ActiveSession = {closed: false, clients: [], watches: new Map()};
+    const session: ActiveSession = {closed: false, clients: new Map(), watches: new Map()};
     active = session;
     try {
       const config = readConfig(configPath);
@@ -63,29 +76,46 @@ export default function mcpEvents(pi: ExtensionAPI) {
         watch.mode === 'webhook' ? config.webhook?.publicUrl : null,
       ]);
       state.retainCursors(config.watches.map(identity));
-      for (const [server, settings] of Object.entries(config.servers)) {
-        if (session.closed) return;
-        const client = new EventsClient(new EventsWire(() => createTransport(settings, dirname(configPath))), {...config.client, webhookReceiver: session.receiver});
-        session.clients.push(client);
-        try { await client.connect(); }
-        catch {
-          for (const entry of session.watches.values()) if (entry.server === server) entry.failure = 'connection failed';
-          if (!session.closed) report(`MCP Events could not connect to ${server}. Check its configuration, credentials, and protocol support.`);
+      const connection = (server: string) => {
+        const existing = session.clients.get(server);
+        if (existing) return existing;
+        session.receiver ??= createReceiver(config, configPath);
+        const client = new EventsClient(new EventsWire(() => createTransport(config.servers[server]!, dirname(configPath))), {...config.client, webhookReceiver: session.receiver});
+        const ready = client.connect().catch(async error => {
+          if (session.clients.get(server)?.client === client) session.clients.delete(server);
           await client.close().catch(() => {});
-          continue;
-        }
-        for (const configured of config.watches.filter(watch => watch.server === server)) {
+          if (!session.closed) report(`MCP Events could not connect to ${server}. Check its configuration, credentials, and protocol support.`);
+          throw error;
+        });
+        const created = {client, ready};
+        session.clients.set(server, created);
+        return created;
+      };
+      for (const configured of config.watches) {
+        const key = identity(configured);
+        const entry = session.watches.get(configured.id)!;
+        const launch = async () => {
+          await entry.watch?.closed.catch(() => {});
+          await session.stopping;
           if (session.closed) return;
-          const key = identity(configured);
-          const entry = session.watches.get(configured.id)!;
+          const restarting = entry.watch !== undefined || entry.failure !== undefined;
+          entry.failure = undefined;
+          let client: EventsClient;
+          try {
+            const connected = connection(configured.server);
+            await connected.ready;
+            client = connected.client;
+            if (restarting && !session.closed) await client.refresh();
+          } catch { entry.failure = 'connection failed'; return; }
+          if (session.closed) return;
           try {
             const watch = client.watch({...configured, cursor: state.getCursor(key),
               ttlMs: state.mode !== 'persistent' && configured.ttlMs === null ? undefined : configured.ttlMs,
             }, observation => {
               if (session.closed) throw new Error('Pi session changed');
-              state.accept({server, watch: configured.id, observation});
+              state.accept({server: configured.server, watch: configured.id, observation});
               delivery.schedule();
-              try { pi.events.emit(OBSERVATION_EVENT, {server, watch: configured.id, observation}); }
+              try { pi.events.emit(OBSERVATION_EVENT, {server: configured.server, watch: configured.id, observation}); }
               catch { /* Other extensions must not prevent conversation delivery. */ }
             }, cursor => {
               if (session.closed) throw new Error('Pi session changed');
@@ -93,15 +123,23 @@ export default function mcpEvents(pi: ExtensionAPI) {
             });
             entry.watch = watch;
             void watch.closed.catch(() => {
+              if (session.closed || entry.watch !== watch) return;
               entry.failure = 'failed';
-              if (!session.closed) report(`MCP Events watch ${configured.id} stopped. Check its configuration and server access.`);
+              report(`MCP Events watch "${configured.id}" stopped. Check its configuration and server access.`);
             });
           } catch {
             entry.failure = 'could not start';
-            report(`MCP Events could not start watch ${configured.id}. Check its event name, arguments, and delivery mode.`);
+            report(`MCP Events could not start watch "${configured.id}". Check its event name, arguments, and delivery mode.`);
           }
-        }
+        };
+        entry.start = () => {
+          if (entry.starting) return entry.starting;
+          if (entry.watch && entry.watch.status !== 'stopped') return Promise.resolve();
+          entry.starting = launch().finally(() => { entry.starting = undefined; });
+          return entry.starting;
+        };
       }
+      await Promise.all([...session.watches.values()].map(entry => entry.start!()));
     } catch {
       if (session.closed) return;
       await stop();
@@ -111,24 +149,39 @@ export default function mcpEvents(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx) => start(ctx));
   pi.on('session_shutdown', stop);
   pi.registerCommand('mcp-events', {
-    description: 'Show event subscription status or stop subscriptions: status, stop [watch-id]',
+    description: 'Manage event subscriptions: status, start <watch-id>, stop [watch-id]',
     handler: async (args, ctx) => {
       const [action = 'status', id] = args.trim().split(/\s+/);
+      if (action === 'start') {
+        if (!id) { ctx.ui.notify('/mcp-events start <watch-id>', 'info'); return; }
+        const entry = active?.watches.get(id);
+        if (!entry?.start) { ctx.ui.notify(`MCP Events watch "${id}" was not found. Use /mcp-events status to list watches.`, 'warning'); return; }
+        if (entry.watch && entry.watch.status !== 'stopped') { report(`MCP Events watch "${id}" is already running.`); return; }
+        await entry.start();
+        if (entry.failure) { ctx.ui.notify(`MCP Events watch "${id}" could not start. Use /mcp-events status for details.`, 'warning'); return; }
+        report(`MCP Events watch "${id}" is starting.`);
+        return;
+      }
       if (action === 'stop') {
         if (id) {
           const entry = active?.watches.get(id);
-          if (!entry) { ctx.ui.notify(`MCP Events watch ${id} was not found. Use /mcp-events status to list watches.`, 'warning'); return; }
+          if (!entry) { ctx.ui.notify(`MCP Events watch "${id}" was not found. Use /mcp-events status to list watches.`, 'warning'); return; }
+          await entry.starting;
           await entry.watch?.stop();
         }
-        else await stop();
-        ctx.ui.notify('MCP Events subscriptions stopped.', 'info');
+        else if (active) {
+          const session = active;
+          await Promise.all([...session.watches.values()].map(entry => entry.starting));
+          await closeConnections(session);
+        }
+        report(id ? `MCP Events watch "${id}" stopped.` : 'MCP Events subscriptions stopped.');
         return;
       }
-      if (action && action !== 'status') { ctx.ui.notify('/mcp-events status\n/mcp-events stop [watch-id]', 'info'); return; }
+      if (action && action !== 'status') { ctx.ui.notify('/mcp-events status\n/mcp-events start <watch-id>\n/mcp-events stop [watch-id]', 'info'); return; }
       const session = active;
-      const running = [...session?.watches.values() ?? []].filter(entry => entry.watch && entry.watch.status !== 'stopped').length;
+      const running = [...session?.watches.values() ?? []].filter(entry => entry.starting || (entry.watch && entry.watch.status !== 'stopped')).length;
       const watches = [...session?.watches ?? []].map(([id, entry]) =>
-        `${id}: ${entry.failure ?? entry.watch?.status ?? 'starting'} — ${entry.server} / ${entry.name} (${entry.mode})`);
+        `${id}: ${entry.starting ? 'starting' : entry.failure ?? entry.watch?.status ?? 'stopped'} — ${entry.server} / ${entry.name} (${entry.mode})`);
       report(session?.state
         ? [`MCP Events: ${session.state.mode}; ${running} running watch(es); ${session.state.size} pending observation(s).`,
           `Event state: ${session.path ?? 'memory only'}`, ...watches, session.state.warning?.message].filter(Boolean).join('\n')
