@@ -1,6 +1,6 @@
 import delay from 'delay';
 import {EventsClientError, EventsClientErrorCode as ErrorCode} from './errors.ts';
-import {completeResult, EventProtocolError, subscribeResult, type EventOccurrence, type WebhookDeliveryStatus} from './protocol.ts';
+import {completeResult, EventMethod, EventProtocolError, subscribeResult, type EventOccurrence, type WebhookDeliveryStatus} from './protocol.ts';
 import {normalizeRequestError} from './request-error.ts';
 import {retryOperation} from './retry.ts';
 import type {WebhookReceiver} from './webhook.ts';
@@ -64,7 +64,7 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
         callbacks.validate();
         attempted = true;
         try {
-          return await wire.request('events/subscribe', {
+          return await wire.request(EventMethod.Subscribe, {
             name: options.name, arguments: options.arguments, cursor: callbacks.cursor(),
             delivery: {mode: 'webhook', url: registration.url, secret: registration.secret},
             ...(options.maxAgeMs === undefined ? {} : {maxAgeMs: options.maxAgeMs}),
@@ -98,7 +98,7 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
       const cleanup = new AbortController();
       try {
         await Promise.race([
-          wire.request('events/unsubscribe', {
+          wire.request(EventMethod.Unsubscribe, {
             name: options.name, arguments: options.arguments, delivery: {url: registration.url},
           }, completeResult, {signal: cleanup.signal}),
           delay(options.webhookUnsubscribeTimeoutMs, {signal: cleanup.signal}),

@@ -2,7 +2,7 @@ import {ProtocolError, type StandardSchemaV1} from '@modelcontextprotocol/client
 import delay from 'delay';
 import {z} from 'zod';
 import {
-  canonical, catalogResult, EventProtocolError, EventProtocolErrorCode, pollResult,
+  canonical, catalogResult, EventMethod, EventProtocolError, EventProtocolErrorCode, pollResult,
   type EventDescriptor, type EventOccurrence, type WebhookDeliveryStatus,
 } from './protocol.ts';
 import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
@@ -125,7 +125,7 @@ export class EventsClient {
     let pages = 0;
     do {
       if (pages++ >= this.settings.maxCatalogPages) throw limitExceeded('maxCatalogPages', this.settings.maxCatalogPages);
-      const result = await this.request('events/list', cursor === undefined ? {} : {cursor}, catalogResult, this.lifetime.signal);
+      const result = await this.request(EventMethod.List, cursor === undefined ? {} : {cursor}, catalogResult, this.lifetime.signal);
       for (const descriptor of result.events) {
         if (contracts.has(descriptor.name)) throw new EventsClientError(ErrorCode.InvalidCatalog, 'Duplicate event name in catalog', {details: {name: descriptor.name}});
         if (contracts.size >= this.settings.maxCatalogEntries) throw limitExceeded('maxCatalogEntries', this.settings.maxCatalogEntries);
@@ -207,7 +207,7 @@ export class EventsClient {
       await deliver({type: 'gap', cursor: null});
       await advance(null);
     };
-    const fetchPoll = () => retry(() => this.request('events/poll', {
+    const fetchPoll = () => retry(() => this.request(EventMethod.Poll, {
       name: options.name, arguments: options.arguments, cursor, maxEvents: options.maxEvents,
       ...(options.maxAgeMs === undefined ? {} : {maxAgeMs: options.maxAgeMs}),
     }, pollResult, signal));

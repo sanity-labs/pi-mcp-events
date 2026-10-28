@@ -6,7 +6,7 @@ import {
 } from '@modelcontextprotocol/client';
 import {
   EVENTS_EXTENSION, PROTOCOL_VERSION, SUBSCRIPTION_ID, clientCapabilities,
-  clientInfo, record, remoteError, EventProtocolError,
+  clientInfo, record, remoteError, EventMethod, EventProtocolError,
 } from './protocol.ts';
 
 type Stream = {
@@ -143,7 +143,7 @@ export class EventsWire {
   }
 
   async stream(
-    method: 'events/stream' | 'subscriptions/listen',
+    method: typeof EventMethod.Stream | 'subscriptions/listen',
     params: Record<string, unknown>,
     signal: AbortSignal,
     onNotification: (method: string, params: Record<string, unknown>) => Promise<void> | void,

@@ -5,6 +5,23 @@ import {ProtocolErrorCode} from '@modelcontextprotocol/client';
 export const PROTOCOL_VERSION = '2026-07-28';
 export const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
 export const SUBSCRIPTION_ID = 'io.modelcontextprotocol/subscriptionId';
+export const EventMethod = {
+  List: 'events/list',
+  Poll: 'events/poll',
+  Stream: 'events/stream',
+  Subscribe: 'events/subscribe',
+  Unsubscribe: 'events/unsubscribe',
+} as const;
+export type EventMethod = typeof EventMethod[keyof typeof EventMethod];
+export const EventNotification = {
+  Active: 'notifications/events/active',
+  Event: 'notifications/events/event',
+  Heartbeat: 'notifications/events/heartbeat',
+  Error: 'notifications/events/error',
+  Terminated: 'notifications/events/terminated',
+  ListChanged: 'notifications/events/list_changed',
+} as const;
+export type EventNotification = typeof EventNotification[keyof typeof EventNotification];
 export const EventProtocolErrorCode = {
   MethodNotFound: ProtocolErrorCode.MethodNotFound,
   InvalidParams: ProtocolErrorCode.InvalidParams,
