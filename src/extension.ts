@@ -5,7 +5,8 @@ import {getAgentDir, type ExtensionAPI, type ExtensionContext} from '@earendil-w
 import {EventsClient, type Watch, type WatchOptions} from './client.ts';
 import {createReceiver, createTransport, readConfig} from './config.ts';
 import {ConversationDelivery} from './conversation.ts';
-import {OBSERVATION_EVENT, STATUS_MESSAGE_TYPE} from './pi-contract.ts';
+import {MESSAGE_TYPE, OBSERVATION_EVENT, STATUS_MESSAGE_TYPE} from './pi-contract.ts';
+import {renderEventMessage} from './message-renderer.ts';
 import {canonical} from './protocol.ts';
 import {SessionState} from './session-state.ts';
 import type {WebhookReceiver} from './webhook.ts';
@@ -21,6 +22,7 @@ type ActiveSession = {
 };
 
 export default function mcpEvents(pi: ExtensionAPI) {
+  pi.registerMessageRenderer(MESSAGE_TYPE, renderEventMessage);
   let active: ActiveSession | undefined;
   const report = (content: string) => {
     try { pi.sendMessage({customType: STATUS_MESSAGE_TYPE, display: true, content}, {triggerTurn: false}); }
