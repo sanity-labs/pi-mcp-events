@@ -3,6 +3,7 @@ import {createHmac, randomBytes, randomUUID} from 'node:crypto';
 import {createServer, request as httpRequest} from 'node:http';
 import {createServer as createHttpsServer, request as httpsRequest} from 'node:https';
 import {createServer as createTcpServer} from 'node:net';
+import {createEventLog} from '../../dev/event-log.mjs';
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -38,9 +39,8 @@ export async function startFixture(tls) {
   const token = randomBytes(32).toString('hex');
   const streams = new Set();
   const webhooks = new Map();
-  const history = [];
+  const history = createEventLog();
   const requests = [];
-  let sequence = 0;
   let verifications = 0;
   let deliveries = 0;
   const send = (response, value) => {
@@ -89,10 +89,8 @@ export async function startFixture(tls) {
     }
     const body = JSON.parse(raw);
     if (request.url === '/emit') {
-      const event = {eventId: randomUUID(), name: 'example.changed', timestamp: new Date().toISOString(), data: body, cursor: String(++sequence)};
-      history.push(event);
-      if (history.length > 1000) history.shift();
-      for (const stream of streams) if (stream.channel === body.channel) notify(stream, 'event', event);
+      const event = history.append('example.changed', body);
+      for (const stream of streams) if (stream.channel === body.channel) notify(stream, 'event', {...event, cursor: history.cursor(stream.key)});
       for (const [key, subscription] of webhooks) {
         if (subscription.expiresAt <= Date.now()) {webhooks.delete(key); continue;}
         if (subscription.channel !== body.channel) continue;
@@ -115,21 +113,22 @@ export async function startFixture(tls) {
         reply({events: [{name: 'example.changed', delivery: ['poll', 'push'], ...schema}, {name: 'example.live_changed', delivery: ['webhook'], ...schema}]});
         return;
       case 'events/poll': {
-        const position = params.cursor === null || params.cursor === undefined ? sequence : Number(params.cursor);
-        const matches = history.filter(event => Number(event.cursor) > position && event.data.channel === channel);
-        const events = matches.slice(0, params.maxEvents ?? 50);
-        const hasMore = events.length < matches.length;
-        reply({events, cursor: hasMore ? events.at(-1).cursor : String(sequence), truncated: false, hasMore, nextPollMs: 1000});
+        const {events, cursor, truncated, hasMore} = history.read({
+          cursor: params.cursor, key: JSON.stringify([params.name, channel]), maxEvents: params.maxEvents ?? 50,
+          matches: event => event.data.channel === channel,
+        });
+        reply({events, cursor, truncated, hasMore, nextPollMs: 1000});
         return;
       }
       case 'events/stream': {
         response.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-cache'});
-        const position = params.cursor === null || params.cursor === undefined ? sequence : Number(params.cursor);
-        const stream = {id: body.id, response, channel};
+        const key = JSON.stringify([params.name, channel]);
+        const page = history.read({cursor: params.cursor, key, matches: event => event.data.channel === channel});
+        const stream = {id: body.id, response, channel, key};
         streams.add(stream);
-        notify(stream, 'active', {cursor: String(position), truncated: false});
-        for (const event of history) if (Number(event.cursor) > position && event.data.channel === channel) notify(stream, 'event', event);
-        const heartbeat = setInterval(() => notify(stream, 'heartbeat', {cursor: String(sequence)}), 1000);
+        notify(stream, 'active', {cursor: page.startCursor, truncated: page.truncated});
+        for (const event of page.events) notify(stream, 'event', event);
+        const heartbeat = setInterval(() => notify(stream, 'heartbeat', {cursor: history.cursor(key)}), 1000);
         response.on('close', () => {clearInterval(heartbeat); streams.delete(stream);});
         return;
       }
