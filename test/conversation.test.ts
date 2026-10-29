@@ -21,6 +21,36 @@ function setup(state = new SessionState(), path?: string) {
     append(message: unknown) {entries.push({...(message as object), type: 'custom_message'});}};
 }
 const item = (cursor: string) => ({server: 's', watch: 'w', observation: {type: 'gap' as const, cursor}});
+const status = () => ({server: 's', watch: 'w', observation: {type: 'status' as const, status: 'retrying' as const}});
+
+it('drains saved status-only observations without a conversation message or model turn', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pi-status-')); cleanup.push(() => rmSync(directory, {recursive: true, force: true}));
+  const path = join(directory, 'state.json');
+  const saved = new SessionState(path);
+  saved.accept(status());
+  saved.accept({server: 's', watch: 'w', observation: {type: 'status', status: 'webhook-delivery', deliveryStatus: {active: true}}});
+  const h = setup(new SessionState(path));
+  h.delivery.schedule(); await vi.advanceTimersByTimeAsync(300);
+  expect(h.sendMessage).not.toHaveBeenCalled();
+  expect(h.state.size).toBe(0);
+  expect(new SessionState(path).size).toBe(0);
+});
+
+it('filters legacy status from mixed batches and acknowledges exactly the original prefix', async () => {
+  const h = setup();
+  h.state.accept(status()); h.state.accept(item('one')); h.state.accept(status());
+  h.sendMessage.mockImplementationOnce(() => { throw new Error('unavailable'); });
+  h.delivery.schedule(); await vi.advanceTimersByTimeAsync(100);
+  expect(h.state.size).toBe(3);
+  await vi.advanceTimersByTimeAsync(100);
+  const message = h.sendMessage.mock.calls[1]![0];
+  expect(message.details.events).toEqual([item('one')]);
+  expect(h.sendMessage.mock.calls[1]![1].triggerTurn).toBe(true);
+  h.state.accept(item('two')); h.append(message);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(h.state.snapshot()).toEqual([item('two')]);
+  expect(h.sendMessage.mock.calls[2]![0].details.events).toEqual([item('two')]);
+});
 
 it('waits for an idle conversation and an accepted batch before acknowledging its prefix', async () => {
   const h = setup(); h.setIdle(false); h.state.accept(item('one')); h.delivery.schedule();
