@@ -333,26 +333,25 @@ export class EventsClient {
     };
     const webhook = async () => {
       let rediscovered = false;
-      let suspended = false;
       while (!signal.aborted) {
         try {
           await subscribeWebhook(this.wire, this.settings.webhookReceiver!, {...this.settings, ...options}, signal, {
             validate: () => { this.contract(options); },
             cursor: () => cursor,
-            active: async (next, truncated, deliveryStatus) => {
+            active: async (next, truncated) => {
               if (next !== null && truncated) await deliver({type: 'gap', cursor: next});
               await advance(next);
-              if (deliveryStatus) suspended = !deliveryStatus.active;
-              currentStatus = suspended ? 'suspended' : 'active';
+              // A successful refresh resumes delivery; its diagnostic status can describe prior suspension.
+              currentStatus = 'active';
               ready.resolve();
             },
             event: async event => {
               await emit(event); await advance(event.cursor); rediscovered = false;
-              currentStatus = suspended ? 'suspended' : 'active';
+              currentStatus = 'active';
             },
             gap: async next => {
               await deliver({type: 'gap', cursor: next}); await advance(next);
-              currentStatus = suspended ? 'suspended' : 'active';
+              currentStatus = 'active';
             },
             deliveryStatus: async deliveryStatus => {
               try { await accept({type: 'status', status: 'webhook-delivery', deliveryStatus}); }
