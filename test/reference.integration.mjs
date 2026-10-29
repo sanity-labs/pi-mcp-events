@@ -30,6 +30,44 @@ async function setup(t, options) {
   return {server, client, wire, poll, setTime(value) { seconds = value; }};
 }
 
+for (const fault of ['stalled-page', 'quota']) {
+  test(`weather reference: polling backs off ${fault} responses and recovers real readings`, {timeout: 20_000}, async t => {
+    const server = await startWeatherServer({port: 0, intervalMs: 0});
+    const polls = [];
+    const wire = new EventsWire(() => createHttpTransport(new URL(server.url), {fetch: async (url, init) => {
+      const request = JSON.parse(init.body);
+      if (request.method !== 'events/poll') return fetch(url, init);
+      polls.push({at: performance.now(), cursor: request.params.cursor});
+      const response = await fetch(url, init);
+      const body = await response.json();
+      if (polls.length === 2 || polls.length === 3) {
+        if (fault === 'quota') return Response.json({jsonrpc: '2.0', id: request.id,
+          error: {code: -32025, message: 'Upstream quota exhausted', data: {limit: 'upstream_requests'}}});
+        return Response.json({...body, result: {...body.result, events: [], cursor: request.params.cursor, hasMore: true}});
+      }
+      return Response.json({...body, result: {...body.result, nextPollMs: 0}});
+    }}));
+    const client = new EventsClient(wire, {pollFloorMs: 50, retryMs: 10});
+    t.after(async () => { await client.close(); await server.close(); });
+    await client.connect();
+    const events = [];
+    const watch = client.watch({name: 'weather.reading', arguments: {}, mode: 'poll', maxEvents: 1}, item => {
+      if (item.type === 'event') events.push(item.event);
+    });
+    await watch.ready;
+    const initialCursor = watch.cursor;
+    const readings = Array.from({length: 3}, () => server.advance()[0]);
+    await until(() => events.length === 3);
+    assert.deepEqual(events.map(event => event.eventId), readings.map(event => event.eventId));
+    assert.deepEqual(polls.slice(1, 4).map(poll => poll.cursor), [initialCursor, initialCursor, initialCursor]);
+    assert.ok(polls[2].at - polls[1].at >= 49, 'first retry respects the floor');
+    assert.ok(polls[3].at - polls[2].at >= 99, 'second retry backs off exponentially');
+    assert.notEqual(watch.cursor, initialCursor);
+    assert.equal(watch.status, 'active');
+    await watch.stop();
+  });
+}
+
 for (const mode of ['poll', 'push']) {
   test(`weather reference: ${mode} preserves basic-offset event timestamps`, {timeout: 20_000}, async t => {
     const {server, client} = await setup(t, {

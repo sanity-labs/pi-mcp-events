@@ -189,6 +189,10 @@ Relative `cwd`, `stateDir`, and TLS file paths resolve from the configuration fi
 
 >With `pi --no-session`, webhook subscriptions always have an expiry, so the server can clean them up if Pi exits unexpectedly. Setting `ttlMs: null` does **not** disable expiry in this mode.
 
+### Polling
+
+Polling drains available pages immediately while the cursor advances or new events arrive. If a server repeatedly claims more events are available without making progress, or returns `ResourceExhausted`, the watch backs off with jitter. Retry delays start at the larger of `retryMs` and `pollFloorMs`, double up to 30 seconds (or a higher configured floor), and stop after `maxRetries`. Successful pages reset the retry budget. The watch retains its cursor; use `/mcp-events start <watchId>` to restart it after retries are exhausted.
+
 ### Webhooks
 
 Add a top-level `webhook` section and set the watch's `mode` to `webhook`:

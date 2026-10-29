@@ -2,7 +2,24 @@ import {afterEach, expect, it, vi} from 'vitest';
 import {EventsClientError, EventsClientErrorCode as ErrorCode} from '../src/index.ts';
 import {retryOperation} from '../src/retry.ts';
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+
+it('honors a retry floor longer than the native timer range without overflow', async () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  const operation = vi.fn(async () => {
+    if (operation.mock.calls.length === 1) throw new EventsClientError(ErrorCode.RequestFailed, 'offline');
+    return 'connected';
+  });
+  const floor = 2 ** 32;
+  const result = retryOperation(operation, {maxRetries: 1, retryMs: 100, retryFloorMs: floor, randomize: true,
+    signal: new AbortController().signal, onRetry: async () => {}});
+  await vi.advanceTimersByTimeAsync(floor - 1);
+  expect(operation).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(1);
+  await expect(result).resolves.toBe('connected');
+  expect(operation).toHaveBeenCalledTimes(2);
+});
 
 it('grows exponential backoff beyond 32 times the base and caps it at 30 seconds', async () => {
   vi.useFakeTimers();
