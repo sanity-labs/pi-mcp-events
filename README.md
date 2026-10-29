@@ -131,6 +131,8 @@ Replace the example URL, event name, and arguments with values from your MCP ser
 
 ### Configuring events subscriptions
 
+Received event timestamps and webhook expiry/status timestamps accept `Z`, `±HH:MM`, and `±HHMM` timezone offsets, including `+0000` and `+0530`. The client validates the date, time, and offset and preserves the received string. Timestamps must include a timezone; local times and hour-only offsets are rejected. Payload fields follow the server's JSON Schema, including its `date-time` format rules.
+
 The extension starts configured watches automatically. With no configuration file, it stays idle. Set `PI_MCP_EVENTS_CONFIG` to use a different file. After changing configuration, run `/reload`.
 
 ## Commands

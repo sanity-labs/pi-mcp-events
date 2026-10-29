@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {canonical, descriptor, occurrence, pollResult} from '../src/protocol.ts';
+import {canonical, descriptor, occurrence, pollResult, subscribeResult} from '../src/protocol.ts';
 import {EventContract} from '../src/validation.ts';
 
 const contract = {
@@ -7,6 +7,33 @@ const contract = {
   inputSchema: {type: 'object', required: ['channel'], properties: {channel: {type: 'string'}}},
   payloadSchema: {type: 'object', required: ['value'], properties: {value: {type: 'number'}}},
 };
+
+describe('received timestamps', () => {
+  const event = (timestamp: string) => ({eventId: 'e', name: contract.name, timestamp, data: {value: 1}});
+  const grant = (timestamp: string) => ({id: 'sub', refreshBefore: timestamp, truncated: false,
+    deliveryStatus: {active: true, lastDeliveryAt: timestamp, failedSince: timestamp}});
+
+  it.each(['Z', '+00:00', '-04:30', '+0000', '-0000', '+0530', '-0430'])('preserves timestamps with offset %s', offset => {
+    const timestamp = `2024-02-29T12:34:56.123${offset}`;
+    expect(occurrence.parse(event(timestamp)).timestamp).toBe(timestamp);
+    expect(subscribeResult.parse(grant(timestamp))).toMatchObject(grant(timestamp));
+  });
+
+  it.each([
+    '2026-02-29T12:34:56+0000', '2026-04-31T12:34:56+0000',
+    '2026-10-29T24:00:00+0000', '2026-10-29T12:60:00+0000', '2026-10-29T12:34:60+0000',
+    '2026-10-29T12:34:56+2400', '2026-10-29T12:34:56-0060',
+    '2026-10-29T12:34:56', '2026-10-29T12:34:56+00',
+    '2026-10-29T12:34:56+0000junk', '2026-10-29T12:34:56+0000\n', '2026-10-29T12:34:56+0000 ',
+  ])('rejects invalid or ambiguous timestamp %j in every timestamp field', timestamp => {
+    expect(occurrence.safeParse(event(timestamp)).success).toBe(false);
+    const valid = '2026-10-29T12:34:56Z';
+    expect(subscribeResult.safeParse({...grant(valid), refreshBefore: timestamp}).success).toBe(false);
+    for (const field of ['lastDeliveryAt', 'failedSince']) {
+      expect(subscribeResult.safeParse({...grant(valid), deliveryStatus: {active: true, [field]: timestamp}}).success).toBe(false);
+    }
+  });
+});
 
 describe('pinned event contracts', () => {
   it.each([true, false])('applies boolean input and payload schemas: %s', accepts => {

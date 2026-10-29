@@ -1,6 +1,6 @@
 import delay from 'delay';
 import {EventsClientError, EventsClientErrorCode as ErrorCode} from './errors.ts';
-import {completeResult, EventMethod, EventProtocolError, subscribeResult, type EventOccurrence, type WebhookDeliveryStatus} from './protocol.ts';
+import {completeResult, EventMethod, EventProtocolError, normalizeTimestampOffset, subscribeResult, type EventOccurrence, type WebhookDeliveryStatus} from './protocol.ts';
 import {normalizeRequestError} from './request-error.ts';
 import {retryOperation} from './retry.ts';
 import type {WebhookReceiver} from './webhook.ts';
@@ -75,7 +75,7 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
       signal.throwIfAborted();
       noExpiry = result.refreshBefore === null;
       if (noExpiry && options.ttlMs !== null) throw new EventsClientError(ErrorCode.InvalidResponse, 'Server granted no expiry without an explicit request');
-      const remaining = result.refreshBefore === null ? Infinity : Date.parse(result.refreshBefore) - Date.now();
+      const remaining = result.refreshBefore === null ? Infinity : Date.parse(normalizeTimestampOffset(result.refreshBefore)) - Date.now();
       if (remaining <= 0) throw new EventsClientError(ErrorCode.InvalidResponse, 'Webhook subscription grant has already expired');
       try { registration.bind(result.id); }
       catch (error) { throw new EventsClientError(ErrorCode.InvalidResponse, 'Server changed the webhook subscription ID', {cause: error}); }
