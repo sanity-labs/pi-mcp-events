@@ -35,7 +35,7 @@ const configSchema = z.strictObject({
   webhook: webhookOptionsSchema.omit({tls: true}).extend({
     keyFile: z.string().min(1).optional(), certFile: z.string().min(1).optional(),
   }).strict().optional(),
-  watches: z.array(watchOptionsSchema.omit({cursor: true}).extend({
+  watches: z.array(watchOptionsSchema.omit({cursor: true, webhookIdentity: true}).extend({
     id: z.string().min(1), server: z.string().min(1),
     arguments: z.record(z.string(), z.json()).default({}),
   }).strict()).default([]),

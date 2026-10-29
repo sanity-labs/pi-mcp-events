@@ -6,3 +6,4 @@ export {WebhookReceiver, type WebhookOptions, type WebhookRegistration, type Web
 export {parseConfig, readConfig, createTransport, createReceiver, type EventsConfig, type ServerConfig} from './config.ts';
 export {Inbox, Checkpoints, type InboxItem, type InboxOptions, type CheckpointOptions} from './inbox.ts';
 export {SessionState, type SessionStateOptions, type PersistenceWarning} from './session-state.ts';
+export type {WebhookIdentity} from './webhook-identities.ts';

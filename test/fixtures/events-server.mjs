@@ -22,7 +22,7 @@ const schema = {
 };
 
 // Synthetic test server only. It accepts callbacks solely through its own loopback TLS proxy.
-export async function startFixture(tls, {catalogUpdates = false, extraEvents = []} = {}) {
+export async function startFixture(tls, {catalogUpdates = false, extraEvents = [], noExpiryWebhooks = false} = {}) {
   const reservation = createTcpServer();
   const callbackPort = await listen(reservation);
   await close(reservation);
@@ -152,9 +152,9 @@ export async function startFixture(tls, {catalogUpdates = false, extraEvents = [
           assert.deepEqual(await signed(subscription, {type: 'verification', challenge}), {challenge});
           verifications++;
         }
-        subscription.expiresAt = Date.now() + 60_000;
+        subscription.expiresAt = noExpiryWebhooks && params.ttlMs === null ? Infinity : Date.now() + 60_000;
         webhooks.set(key, subscription);
-        reply({id: subscription.id, refreshBefore: new Date(subscription.expiresAt).toISOString(), cursor: null, truncated: false});
+        reply({id: subscription.id, refreshBefore: subscription.expiresAt === Infinity ? null : new Date(subscription.expiresAt).toISOString(), cursor: null, truncated: false});
         return;
       }
       case 'events/unsubscribe':

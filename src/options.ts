@@ -1,9 +1,11 @@
 import {z} from 'zod';
+import {webhookIdentitySchema} from './webhook-identities.ts';
 import {deliveryMode} from './protocol.ts';
 
 export const watchOptionsSchema = z.object({
   name: z.string().min(1), arguments: z.record(z.string(), z.unknown()),
   mode: deliveryMode, ttlMs: z.number().int().positive().nullable().optional(), cursor: z.string().nullable().optional(),
+  webhookIdentity: webhookIdentitySchema.optional(),
   maxAgeMs: z.number().int().nonnegative().optional(), maxEvents: z.number().int().positive().default(50),
 });
 export const clientSettingsSchema = z.object({

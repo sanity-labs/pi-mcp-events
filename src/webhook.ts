@@ -1,10 +1,10 @@
 import {isUtf8} from 'node:buffer';
-import {randomBytes} from 'node:crypto';
 import {createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse} from 'node:http';
 import {createServer as createHttpsServer} from 'node:https';
 import {Webhook} from 'standardwebhooks';
 import {z} from 'zod';
 import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
+import {createWebhookIdentity, webhookIdentitySchema, type WebhookIdentity} from './webhook-identities.ts';
 import {cursor, occurrence, remoteError, type EventOccurrence} from './protocol.ts';
 
 const control = z.discriminatedUnion('type', [
@@ -101,12 +101,15 @@ export class WebhookReceiver {
     return this.starting;
   }
   address() { return this.server?.address(); }
-  register(accept: Route['accept']): WebhookRegistration {
+  register(accept: Route['accept'], restoredIdentity?: WebhookIdentity): WebhookRegistration {
     this.assertOpen();
     if (this.routes.size >= this.options.maxRegistrations) throw limitExceeded('maxRegistrations', this.options.maxRegistrations);
     const url = new URL(this.options.publicUrl);
-    url.pathname = `${url.pathname.replace(/\/$/, '')}/${randomBytes(24).toString('hex')}`;
-    const secret = `whsec_${randomBytes(32).toString('base64')}`;
+    const identity = webhookIdentitySchema.safeParse(restoredIdentity ?? createWebhookIdentity());
+    if (!identity.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid restored webhook identity');
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/${identity.data.routeId}`;
+    if (this.routes.has(url.pathname)) throw new EventsClientError(ErrorCode.InvalidOptions, 'Webhook identity is already registered');
+    const {secret} = identity.data;
     const route: Route = {verifier: new Webhook(secret), closed: false, deliveries: new Map(), accept, tail: Promise.resolve(), pending: 0};
     this.routes.set(url.pathname, route);
     return {

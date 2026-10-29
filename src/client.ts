@@ -9,6 +9,7 @@ import {
 import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
 import {retryable, retryOperation} from './retry.ts';
 import {clientSettingsSchema, watchOptionsSchema} from './options.ts';
+import type {WebhookIdentity} from './webhook-identities.ts';
 import {WebhookReceiver} from './webhook.ts';
 import {subscribeWebhook} from './webhook-subscription.ts';
 import {streamEvents} from './stream.ts';
@@ -21,6 +22,7 @@ export type WatchOptions = {
   name: string;
   arguments: Record<string, unknown>;
   mode: 'poll' | 'push' | 'webhook';
+  webhookIdentity?: WebhookIdentity;
   ttlMs?: number | null;
   cursor?: string | null;
   maxAgeMs?: number;

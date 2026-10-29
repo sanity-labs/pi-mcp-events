@@ -202,6 +202,94 @@ describe('webhook watches', () => {
     expect(checkpoints).toEqual(['grant', 'slow', 'renewal']);
   });
 
+  it('keeps renewing while delivery is blocked and coalesces grants without losing a gap', async () => {
+    const s = await setup({webhookRefreshMs: 10});
+    const began = Promise.withResolvers<void>();
+    s.subscribe(async req => {
+      const count = s.subscriptions.length;
+      if (count > 1) await began.promise;
+      if (count <= 5) s.grant(req, {cursor: count === 5 ? null : `grant-${count}`, truncated: count === 2,
+        refreshBefore: new Date(Date.now() + 100).toISOString()});
+    });
+    const accepted = Promise.withResolvers<void>();
+    const checkpoints: Array<string | null> = [];
+    const observations: Observation[] = [];
+    const watch = s.client.watch(options, item => {
+      observations.push(item);
+      if (item.type === 'event') { began.resolve(); return accepted.promise; }
+    }, cursor => { checkpoints.push(cursor); });
+    try {
+      await watch.ready;
+      const pending = s.post(s.subscriptions[0]!, event('slow'));
+      await began.promise;
+      await vi.waitFor(() => expect(s.subscriptions).toHaveLength(6));
+      expect(s.subscriptions.slice(1).every(req => req.params!.cursor === 'grant-1')).toBe(true);
+      expect(checkpoints).toEqual(['grant-1']);
+      accepted.resolve();
+      expect(await pending).toBe(204);
+      await vi.waitFor(() => expect(watch.cursor).toBeNull());
+      expect(checkpoints).toEqual(['grant-1', 'slow', 'grant-2', null]);
+      expect(observations.filter(item => item.type === 'gap')).toEqual([{type: 'gap', cursor: 'grant-2'}]);
+    } finally { accepted.resolve(); }
+  });
+
+  it('renews while an initial checkpoint is blocked and preserves the next delivery boundary', async () => {
+    const s = await setup({webhookRefreshMs: 10});
+    const arrived = Promise.withResolvers<void>();
+    s.subscribe(async req => {
+      const count = s.subscriptions.length;
+      if (count > 1) await arrived.promise;
+      if (count <= 4) s.grant(req, {cursor: `grant-${count}`});
+    });
+    const checkpointGate = Promise.withResolvers<void>();
+    const began = Promise.withResolvers<void>();
+    const register = s.receiver.register.bind(s.receiver);
+    vi.spyOn(s.receiver, 'register').mockImplementation((accept, identity) => register(body => {
+      const pending = accept(body);
+      arrived.resolve();
+      return pending;
+    }, identity));
+    const checkpoints: Array<string | null> = [];
+    const watch = s.client.watch(options, () => {}, async cursor => {
+      checkpoints.push(cursor);
+      if (cursor === 'grant-1') { began.resolve(); await checkpointGate.promise; }
+    });
+    try {
+      await began.promise;
+      const pending = s.post(s.subscriptions[0]!, event('between'));
+      await arrived.promise;
+      await vi.waitFor(() => expect(s.subscriptions).toHaveLength(5));
+      checkpointGate.resolve();
+      await watch.ready;
+      expect(await pending).toBe(204);
+      await vi.waitFor(() => expect(watch.cursor).toBe('grant-4'));
+      expect(checkpoints.indexOf('between')).toBeGreaterThan(0);
+      expect(checkpoints.at(-1)).toBe('grant-4');
+    } finally { checkpointGate.resolve(); }
+  });
+
+  it('continues lease retries while the retry status consumer is blocked', async () => {
+    const s = await setup({webhookRefreshMs: 10});
+    s.subscribe(req => {
+      const count = s.subscriptions.length;
+      if (count === 2) s.transport.fail(req, -32603);
+      else if (count <= 4) s.grant(req, {cursor: `grant-${count}`});
+    });
+    const accepted = Promise.withResolvers<void>();
+    const began = Promise.withResolvers<void>();
+    const watch = s.client.watch(options, item => {
+      if (item.type === 'status' && item.status === 'retrying') { began.resolve(); return accepted.promise; }
+    });
+    try {
+      await watch.ready;
+      await began.promise;
+      await vi.waitFor(() => expect(s.subscriptions).toHaveLength(5));
+      expect(watch.cursor).toBe('grant-1');
+      accepted.resolve();
+      await vi.waitFor(() => expect(watch.cursor).toBe('grant-4'));
+    } finally { accepted.resolve(); }
+  });
+
   it('retries consumer and checkpoint failures independently without another subscribe', async () => {
     const s = await setup();
     let deliveries = 0; let saves = 0;
