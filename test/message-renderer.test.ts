@@ -54,8 +54,19 @@ it('keeps warnings visible when they occur after the previewed observations', ()
     {type: 'status', status: 'retrying'},
   ] as const) events.push({server: 'scores', watch: 'plays', observation});
   const output = plain(render(batch(events)));
-  for (const label of ['delivery gap', 'source error', 'webhook delivery suspended', 'retrying']) expect(output).toContain(label);
+  for (const label of ['delivery gap', 'source error', 'webhook delivery resumed after suspension', 'retrying']) expect(output).toContain(label);
   expect(output).toContain('21 more observation(s)');
+});
+
+it('describes a refresh as resumed delivery while retaining the original suspension diagnostics', () => {
+  const deliveryStatus = {active: false, lastError: 'timeout'} as const;
+  const message = batch([{server: 'scores', watch: 'plays', observation: {type: 'status', status: 'webhook-delivery', deliveryStatus}}]);
+  const compact = plain(render(message));
+  expect(compact).toContain('webhook delivery resumed after suspension');
+  expect(compact).not.toContain('webhook delivery suspended');
+  const expanded = plain(render(message, true));
+  expect(expanded).toContain('"active":false');
+  expect(expanded).toContain('"lastError":"timeout"');
 });
 
 it('bounds collapsed rows and visual width for large Unicode payloads and configured padding', () => {

@@ -61,24 +61,33 @@ async function setup(settings: ClientOptions = {}) {
 }
 
 describe('webhook watches', () => {
-  it('reports suspended delivery and recovers on renewal without an event', async () => {
+  it('reports reactivation after a refresh while preserving prior suspension diagnostics', async () => {
     const s = await setup({webhookRefreshMs: 20});
     s.subscribe(() => {});
-    const watch = s.client.watch(options, () => {});
+    const observations: Observation[] = [];
+    const watch = s.client.watch(options, item => { observations.push(item); });
     expect(watch.status).toBe('starting');
     await vi.waitFor(() => expect(s.subscriptions).toHaveLength(1));
-    s.grant(s.subscriptions[0]!, {deliveryStatus: {active: false, lastError: 'timeout'}});
+    s.grant(s.subscriptions[0]!);
     await watch.ready;
-    expect(watch.status).toBe('suspended');
+    expect(watch.status).toBe('active');
     await vi.waitFor(() => expect(s.subscriptions).toHaveLength(2));
-    s.transport.fail(s.subscriptions[1]!, -32603);
+    const deliveryStatus = {active: false, lastError: 'timeout'};
+    s.grant(s.subscriptions[1]!, {deliveryStatus});
+    await vi.waitFor(() => expect(observations).toContainEqual({type: 'status', status: 'webhook-delivery', deliveryStatus}));
+    expect(watch.status).toBe('active');
+    expect(await s.post(s.subscriptions[0]!, event('resumed'))).toBe(204);
+    expect(watch.status).toBe('active');
+    expect(observations).toContainEqual({type: 'event', event: event('resumed')});
+    expect(await s.post(s.subscriptions[0]!, {type: 'gap', cursor: 'fresh'})).toBe(204);
+    expect(watch.status).toBe('active');
     await vi.waitFor(() => expect(s.subscriptions).toHaveLength(3));
-    expect(watch.status).toBe('retrying');
-    s.grant(s.subscriptions[2]!);
+    s.transport.fail(s.subscriptions[2]!, -32603);
     await vi.waitFor(() => expect(s.subscriptions).toHaveLength(4));
-    expect(watch.status).toBe('suspended');
-    s.grant(s.subscriptions[3]!, {deliveryStatus: {active: true}});
-    await vi.waitFor(() => expect(watch.status).toBe('active'));
+    expect(watch.status).toBe('retrying');
+    s.grant(s.subscriptions[3]!, {cursor: 'renewed-without-status'});
+    await vi.waitFor(() => expect(watch.cursor).toBe('renewed-without-status'));
+    expect(watch.status).toBe('active');
     await watch.stop();
     expect(watch.status).toBe('stopped');
   });
@@ -389,24 +398,38 @@ describe('webhook watches', () => {
     const unused = s.receiver.register(() => {}); await unused.close();
   });
 
-  it('drains an active consumer before stop completes and skips its pending checkpoint', async () => {
-    const s = await setup();
+  it.each([
+    ['consumer', 'watch'], ['checkpoint', 'watch'], ['consumer', 'client'], ['checkpoint', 'client'],
+  ] as const)('bounds unsubscribe before a blocked %s drains during %s shutdown', async (blocked, shutdown) => {
+    const s = await setup({webhookUnsubscribeTimeoutMs: 20});
+    s.subscribe(req => s.grant(req, {refreshBefore: null}));
+    s.unsubscribe(() => {});
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
-    const watch = s.client.watch(options, item => {
-      if (item.type === 'event') { entered.resolve(); return release.promise; }
-    });
-    await watch.ready;
-    const posted = s.post(s.subscriptions[0]!, event('busy'));
-    await entered.promise;
-    let closed = false;
-    const stopping = watch.stop().then(() => { closed = true; });
-    await new Promise(resolve => setTimeout(resolve, 10));
-    expect(closed).toBe(false);
-    release.resolve();
-    expect(await posted).toBe(503);
-    await stopping;
-    expect(watch.cursor).toBe('grant');
+    const wait = () => { entered.resolve(); return release.promise; };
+    const watch = s.client.watch({...options, ttlMs: null}, item => {
+      if (blocked === 'consumer' && item.type === 'event') return wait();
+    }, cursor => { if (blocked === 'checkpoint' && cursor === 'busy') return wait(); });
+    try {
+      await watch.ready;
+      const posted = s.post(s.subscriptions[0]!, event('busy'));
+      await entered.promise;
+      let closed = false;
+      const stopping = (shutdown === 'watch' ? watch.stop() : s.client.close()).then(() => { closed = true; });
+      await vi.waitFor(() => expect(s.unsubscribes).toHaveLength(1));
+      const unsubscribe = s.unsubscribes[0]!;
+      expect(unsubscribe.params).toMatchObject({name: descriptor.name, arguments: {}, delivery: {url: (s.subscriptions[0]!.params!.delivery as {url: string}).url}});
+      await vi.waitFor(() => expect(s.transport.messages.some(({message}) => 'method' in message
+        && message.method === 'notifications/cancelled' && message.params?.requestId === unsubscribe.id)).toBe(true));
+      expect(closed).toBe(false);
+      expect(await s.post(s.subscriptions[0]!, event('late'))).toBe(404);
+      release.resolve();
+      expect(await posted).toBe(503);
+      await stopping;
+      expect(watch.cursor).toBe('grant');
+      expect(watch.status).toBe('stopped');
+      expect(s.unsubscribes).toHaveLength(1);
+    } finally { release.resolve(); }
   });
 
   it('bounds cleanup while a disconnected wire is still reconnecting', async () => {

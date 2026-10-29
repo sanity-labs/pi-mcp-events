@@ -10,7 +10,7 @@ function warning(observation: Observation): string | undefined {
   if (observation.type !== 'status') return;
   if (observation.status === 'source-error') return 'source error';
   if (observation.status === 'webhook-delivery') {
-    if (!observation.deliveryStatus.active) return 'webhook delivery suspended';
+    if (!observation.deliveryStatus.active) return 'webhook delivery resumed after suspension';
     return;
   }
   return observation.status;

@@ -380,6 +380,22 @@ test('saved Pi session restores cursors and pending events after resume', {timeo
   await h.shutdown();
 });
 
+test('Pi reports an active webhook after a refresh reactivates suspended delivery', {timeout: 45_000}, async t => {
+  const h = await setup(t, {configure: config => ({...config, client: {...config.client, webhookRefreshMs: 100}})});
+  const rpc = await h.start();
+  writeFileSync(h.release, 'continue');
+  h.fixture.setWebhookDeliveryStatus({active: false, lastError: 'timeout'});
+  await until(async () => observations(await rpc.getMessages()).some(item => item.watch === 'webhook'
+    && item.observation.type === 'status' && item.observation.status === 'webhook-delivery'
+    && item.observation.deliveryStatus.active === false), 'prior suspension diagnostic reaches the conversation');
+  h.fixture.setWebhookDeliveryStatus(undefined);
+  assert.ok((await watchStatus(rpc)).includes('webhook: active'));
+  await h.emit(43); await h.received(43);
+  assert.ok((await watchStatus(rpc)).includes('webhook: active'));
+  await ordinaryTool(rpc);
+  await h.shutdown();
+});
+
 test('saved Pi session renews the same no-expiry webhook after a crash', {timeout: 60_000}, async t => {
   const h = await setup(t, {ephemeral: false, noExpiryWebhooks: true,
     configure: config => ({...config, client: {...config.client, webhookRefreshMs: 100}})});

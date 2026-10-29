@@ -44,6 +44,7 @@ export async function startFixture(tls, {catalogUpdates = false, extraEvents = [
   const requests = [];
   let verifications = 0;
   let deliveries = 0;
+  let webhookDeliveryStatus;
   const send = (response, value) => {
     response.writeHead(200, {'content-type': 'application/json'});
     response.end(JSON.stringify(value));
@@ -154,7 +155,8 @@ export async function startFixture(tls, {catalogUpdates = false, extraEvents = [
         }
         subscription.expiresAt = noExpiryWebhooks && params.ttlMs === null ? Infinity : Date.now() + 60_000;
         webhooks.set(key, subscription);
-        reply({id: subscription.id, refreshBefore: subscription.expiresAt === Infinity ? null : new Date(subscription.expiresAt).toISOString(), cursor: null, truncated: false});
+        reply({id: subscription.id, refreshBefore: subscription.expiresAt === Infinity ? null : new Date(subscription.expiresAt).toISOString(), cursor: null, truncated: false,
+          ...(webhookDeliveryStatus === undefined ? {} : {deliveryStatus: webhookDeliveryStatus})});
         return;
       }
       case 'events/unsubscribe':
@@ -171,6 +173,7 @@ export async function startFixture(tls, {catalogUpdates = false, extraEvents = [
     return {
       connection: {baseUrl, url: `${baseUrl}/mcp`, token, callbackOrigin, callbackPort, callbackTls: false, webhookEventName: 'example.live_changed', webhookReplay: false},
       requests,
+      setWebhookDeliveryStatus(status) { webhookDeliveryStatus = status; },
       setExtraEvents(events) {
         extraEvents = events;
         for (const stream of catalogs) notify(stream, 'list_changed', {});

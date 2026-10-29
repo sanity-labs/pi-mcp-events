@@ -117,8 +117,7 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
     throw error;
   } finally {
     stopped.abort(new EventsClientError(ErrorCode.Stopped, 'Webhook subscription stopped'));
-    await registration.close();
-    await tail;
+    const draining = registration.close();
     if (attempted) {
       const cleanup = new AbortController();
       try {
@@ -131,5 +130,7 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
       } catch { /* Finite grants expire if eager cleanup cannot reach the server. */ }
       finally { cleanup.abort(); }
     }
+    await draining;
+    await tail;
   }
 }
