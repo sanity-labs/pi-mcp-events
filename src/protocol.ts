@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {createRequire} from 'node:module';
 import {ProtocolErrorCode} from '@modelcontextprotocol/client';
 
 // Pinned draft: https://github.com/modelcontextprotocol/modelcontextprotocol/blob/b0efd116faca84c9caad109ccf0778da4dc49579/seps/0000-events-extension.md
@@ -32,7 +33,7 @@ export const EventProtocolErrorCode = {
   Unsupported: -32026,
   CallbackEndpointError: -32027,
 } as const;
-export const clientInfo = {name: 'pi-mcp-events', version: '0.0.0'};
+export const clientInfo = {name: 'pi-mcp-events', version: createRequire(import.meta.url)('../package.json').version as string};
 export const clientCapabilities = {extensions: {[EVENTS_EXTENSION]: {}}};
 export const record = z.record(z.string(), z.unknown());
 export const cursor = z.string().nullable().optional().transform(value => value ?? null);

@@ -11,6 +11,12 @@ An implementation of the **MCP Events specification draft, [SEP-3415 pinned at `
 ## Install
 
 ```sh
+pi install npm:@sanity-labs/pi-mcp-events
+```
+
+To install from source and run the demo:
+
+```sh
 git clone git@github.com:sanity-labs/pi-mcp-events.git
 cd pi-mcp-events
 npm ci
@@ -19,8 +25,8 @@ pi install "$PWD"
 
 `npm ci` builds the extension. Start a new Pi session or use `/reload` after installation. 
 
-- To update, pull the reviewed changes and run `npm ci` again. 
-- To remove `pi-mcp-events`, run `pi remove /absolute/path/to/pi-mcp-events`.
+- For source installs, pull the reviewed changes and run `npm ci` again.
+- To remove an npm installation, run `pi remove npm:@sanity-labs/pi-mcp-events`. For a source installation, use `pi remove /absolute/path/to/pi-mcp-events`.
 
 ## Try the demo
 
@@ -283,7 +289,7 @@ npm run validate
 
 ## Stability
 
-`pi-mcp-events` is currently an alpha-build. Expect public APIs to change frequently. MCP Events spec is an evolving draft.
+`pi-mcp-events` is an early release. Expect public APIs to change frequently. MCP Events spec is an evolving draft.
 
 ## Feedback
 

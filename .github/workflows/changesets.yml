@@ -1,0 +1,37 @@
+name: Generate dependency changesets
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changesets-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changeset:
+    if: >-
+      github.repository == 'sanity-labs/pi-mcp-events' &&
+      vars.ENABLE_CHANGESET_BOT == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: app
+        with:
+          app-id: ${{ secrets.ECOSPARK_APP_ID }}
+          private-key: ${{ secrets.ECOSPARK_APP_PRIVATE_KEY }}
+          owner: sanity-labs
+          repositories: pi-mcp-events
+          permission-contents: write
+          permission-pull-requests: read
+      - uses: mscharley/dependency-changesets-action@874dac2372a085cb94f750e8bdf5b1173a838a75 # v1.2.5
+        with:
+          token: ${{ steps.app.outputs.token }}
+          use-conventional-commits: true
+          sign-commits: true

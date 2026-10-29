@@ -89,7 +89,6 @@ test('weather reference: push backs off repeated schema terminations and recover
   const server = await startWeatherServer({port: 0, intervalMs: 0});
   const streams = [];
   let catalogs = 0;
-  let initialCursor;
   let realStreamActive = false;
   const wire = new EventsWire(() => createHttpTransport(new URL(server.url), {fetch: async (url, init) => {
     const request = JSON.parse(init.body);
@@ -110,7 +109,7 @@ test('weather reference: push backs off repeated schema terminations and recover
   const client = new EventsClient(wire, {retryMs: 40, maxRetries: 2});
   t.after(async () => { await client.close(); await server.close(); });
   await client.connect();
-  initialCursor = (await wire.request('events/poll', {name: 'weather.reading', arguments: {}, cursor: null}, result)).cursor;
+  const initialCursor = (await wire.request('events/poll', {name: 'weather.reading', arguments: {}, cursor: null}, result)).cursor;
   const observations = [];
   const watch = client.watch({name: 'weather.reading', arguments: {}, mode: 'push', cursor: initialCursor}, item => { observations.push(item); },
     () => { if (streams.length === 4) realStreamActive = true; });

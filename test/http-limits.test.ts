@@ -104,7 +104,7 @@ it('counts UTF-8 bytes and the full multiline frame, including comments and sepa
 });
 
 it('preserves typed stream limit failures and leaves other HTTP streams running', async () => {
-  const sent: Array<{body: Record<string, any>; raw: ReturnType<typeof source>}> = [];
+  const sent: Array<{body: Record<string, unknown>; raw: ReturnType<typeof source>}> = [];
   const wire = new EventsWire(createHttpTransport(new URL('http://localhost/mcp'), {maxResponseBytes: 500, fetch: async (_url, init) => {
     const body = JSON.parse(String(init?.body));
     if (body.method === 'server/discover') return new Response(JSON.stringify({jsonrpc: '2.0', id: body.id, result: {resultType: 'complete', supportedVersions: [PROTOCOL_VERSION], capabilities: {extensions: {[EVENTS_EXTENSION]: {}}}}}), {headers: {'content-type': 'application/json'}});

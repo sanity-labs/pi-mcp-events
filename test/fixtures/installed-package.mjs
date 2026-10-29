@@ -14,16 +14,26 @@ const npm = (args, cwd) => execFileSync('npm', args, {cwd, encoding: 'utf8', tim
 let resolveInstalled;
 
 try {
+  assert.ok(manifest.keywords.includes('pi-package'));
+  assert.deepEqual(manifest.pi.extensions, ['./dist/extension.js']);
+  assert.equal(manifest.publishConfig.access, 'public');
   const [archive] = JSON.parse(npm(['pack', '--json', '--pack-destination', consumer], checkout));
   const paths = archive.files.map(file => file.path);
   for (const path of paths) {
-    assert.match(path, /^(dist\/[^/]+\.(js|d\.ts)|package\.json|README\.md|LICENSE)$/);
+    assert.match(path, /^(dist\/[^/]+\.(js|d\.ts)|package\.json|README\.md|LICENSE|CHANGELOG\.md)$/);
   }
   for (const path of ['package.json', 'README.md', 'LICENSE']) assert.ok(paths.includes(path), `Missing ${path}`);
+  if (manifest.version !== '0.0.0') assert.ok(paths.includes('CHANGELOG.md'), 'Missing CHANGELOG.md');
   for (const entry of Object.values(manifest.exports)) {
     for (const path of Object.values(entry)) assert.ok(paths.includes(path.replace(/^\.\//, '')), `Missing export ${path}`);
   }
-  writeFileSync(join(consumer, 'package.json'), JSON.stringify({private: true, type: 'module'}));
+  const consumerManifest = {name: 'pi-events-install-test', version: '0.0.0', private: true, type: 'module', overrides: manifest.overrides};
+  writeFileSync(join(consumer, 'package.json'), JSON.stringify(consumerManifest));
+  const lock = JSON.parse(readFileSync(join(checkout, 'package-lock.json'), 'utf8'));
+  lock.name = consumerManifest.name;
+  lock.version = consumerManifest.version;
+  lock.packages[''] = consumerManifest;
+  writeFileSync(join(consumer, 'package-lock.json'), JSON.stringify(lock));
   npm(['install', '--no-audit', '--no-fund', '--prefer-offline', join(consumer, archive.filename),
     ...['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'].map(name => `${name}@${manifest.devDependencies[name]}`)], consumer);
   const resolver = join(consumer, 'resolve.mjs');
