@@ -42,7 +42,9 @@ async function setup(settings: ClientOptions = {}) {
   }), {retryMs: 10, heartbeatMs: 100, maxRetries: 2, ...settings});
   cleanups.push(() => client.close());
   await client.connect();
-  return {client, transports, streams, onStream(handler: typeof onStream) { onStream = handler; }};
+  return {client, transports, streams, onStream(handler: typeof onStream) { onStream = handler; },
+    get catalogs() { return transports.flatMap(transport => transport.messages).filter(({message}) => 'method' in message && message.method === 'events/list').length; },
+  };
 }
 
 it.each([
@@ -204,4 +206,142 @@ it('keeps the default 30-second heartbeat assumption', async () => {
   expect(watch.status).toBe('active');
   await vi.advanceTimersByTimeAsync(16);
   expect(s.streams).toHaveLength(2);
+});
+
+const terminateSchema = (stream: Stream) => notify(stream, 'terminated', {
+  error: {code: -32026, message: 'Schema changed', data: {feature: 'payloadSchema', reason: 'schema_changed'}},
+});
+
+it.each(['heartbeat', 'duplicate-event', 'new-event'])('bounds schema recovery with short-lived %s traffic', async traffic => {
+  const s = await setup();
+  s.onStream(stream => {
+    notify(stream, 'active', {cursor: 'same', truncated: false});
+    if (traffic === 'heartbeat') notify(stream, 'heartbeat', {cursor: 'same'});
+    else notify(stream, 'event', event(traffic === 'new-event' ? `event-${s.streams.length}` : 'same', 'same'));
+    if (s.streams.length <= 4) terminateSchema(stream);
+  });
+  const watch = s.client.watch(options, () => {});
+  await flush();
+  expect(s.streams).toHaveLength(2);
+  expect(s.catalogs).toBe(2);
+  await vi.advanceTimersByTimeAsync(14);
+  expect(s.streams).toHaveLength(2);
+  expect(s.catalogs).toBe(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(s.streams).toHaveLength(3);
+  expect(s.catalogs).toBe(3);
+  await vi.advanceTimersByTimeAsync(29);
+  expect(s.streams).toHaveLength(3);
+  expect(s.catalogs).toBe(3);
+  await vi.advanceTimersByTimeAsync(1);
+  await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.RetryExhausted,
+    cause: {code: ErrorCode.SubscriptionTerminated, cause: {code: -32026}}});
+  expect(s.streams).toHaveLength(4);
+  expect(s.catalogs).toBe(4);
+  expect(s.streams.map(stream => stream.request.params?.cursor)).toEqual(['saved', null, null, null]);
+});
+
+it.each([
+  {code: -32026, message: 'Schema changed', data: {reason: 'schema_changed'}},
+  {code: -32023, message: 'Event removed', data: {kind: 'event'}},
+])('allows one immediate rediscovery with retries disabled for $message, then bounds catalog reads', async error => {
+  const s = await setup({maxRetries: 0});
+  s.onStream(stream => {
+    notify(stream, 'active', {cursor: 'same', truncated: false});
+    notify(stream, 'heartbeat', {cursor: 'same'});
+    if (s.streams.length <= 2) notify(stream, 'terminated', {error});
+  });
+  const watch = s.client.watch(options, () => {});
+  await flush();
+  expect(s.streams).toHaveLength(2);
+  await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.RetryExhausted});
+  expect(s.catalogs).toBe(2);
+});
+
+it.each(['same', null])('resets schema recovery only after sustained quiet health with cursor %s', async cursor => {
+  const s = await setup({maxRetries: 1});
+  s.onStream(stream => {
+    notify(stream, 'active', {cursor, truncated: false});
+    notify(stream, 'heartbeat', {cursor});
+  });
+  const watch = s.client.watch(options, () => {});
+  await flush();
+  terminateSchema(s.streams[0]!);
+  await flush();
+  expect(s.streams).toHaveLength(2);
+  terminateSchema(s.streams[1]!);
+  await flush();
+  expect(s.streams).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(15);
+  expect(s.streams).toHaveLength(3);
+  for (let beat = 0; beat < 2; beat++) {
+    await vi.advanceTimersByTimeAsync(100);
+    notify(s.streams[2]!, 'heartbeat', {cursor});
+    await flush();
+  }
+  terminateSchema(s.streams[2]!);
+  await flush();
+  expect(s.streams).toHaveLength(4);
+  terminateSchema(s.streams[3]!);
+  await flush();
+  expect(s.streams).toHaveLength(4);
+  await vi.advanceTimersByTimeAsync(15);
+  expect(s.streams).toHaveLength(5);
+  terminateSchema(s.streams[4]!);
+  await flush();
+  await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.RetryExhausted});
+  expect(s.catalogs).toBe(5);
+});
+
+it('shares the stream retry budget across schema terminations and connection failures', async () => {
+  const s = await setup();
+  s.onStream(stream => {
+    notify(stream, 'active', {cursor: 'same', truncated: false});
+    notify(stream, 'heartbeat', {cursor: 'same'});
+    if ([1, 3].includes(s.streams.length)) terminateSchema(stream);
+    else stream.transport.respond(stream.request, {});
+  });
+  const watch = s.client.watch(options, () => {});
+  await flush();
+  expect(s.streams).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(15);
+  expect(s.streams).toHaveLength(3);
+  await vi.advanceTimersByTimeAsync(29);
+  expect(s.streams).toHaveLength(3);
+  await vi.advanceTimersByTimeAsync(1);
+  await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.RetryExhausted});
+  expect(s.streams).toHaveLength(4);
+  expect(s.catalogs).toBe(3);
+});
+
+it('cancels schema-recovery backoff without another stream or catalog read', async () => {
+  const s = await setup();
+  s.onStream(stream => {
+    notify(stream, 'active', {cursor: 'same', truncated: false});
+    notify(stream, 'heartbeat', {cursor: 'same'});
+    if (s.streams.length <= 2) terminateSchema(stream);
+  });
+  const watch = s.client.watch(options, () => {});
+  await flush();
+  expect(s.streams).toHaveLength(2);
+  await watch.stop();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(s.streams).toHaveLength(2);
+  expect(s.catalogs).toBe(2);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('keeps authorization termination fatal after schema recovery', async () => {
+  const s = await setup();
+  s.onStream(stream => {
+    notify(stream, 'active', {cursor: 'same', truncated: false});
+    notify(stream, 'heartbeat', {cursor: 'same'});
+    if (s.streams.length === 1) terminateSchema(stream);
+    else notify(stream, 'terminated', {error: {code: -32024, message: 'Access revoked'}});
+  });
+  const watch = s.client.watch(options, () => {});
+  await flush();
+  await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.SubscriptionTerminated, cause: {code: -32024}});
+  expect(s.streams).toHaveLength(2);
+  expect(s.catalogs).toBe(2);
 });

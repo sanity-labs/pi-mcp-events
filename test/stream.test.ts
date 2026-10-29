@@ -266,8 +266,8 @@ describe('event streaming', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('rediscovers once after schema termination and stops persistent incompatibility', async () => {
-    const {client, transport, requests, active} = setup();
+  it('rediscovers once with retries disabled and stops persistent schema incompatibility', async () => {
+    const {client, transport, requests, active} = setup({maxRetries: 0});
     await client.connect();
     const observations: Observation[] = [];
     const watch = client.watch(options, item => { observations.push(item); });
@@ -281,7 +281,7 @@ describe('event streaming', () => {
     expect(observations.filter(item => item.type === 'gap')).toEqual([{type: 'gap', cursor: null}]);
     active(requests[1]!);
     await flush(); terminate(requests[1]!);
-    await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.SubscriptionTerminated, cause: {code: -32026}});
+    await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.RetryExhausted, cause: {code: ErrorCode.SubscriptionTerminated, cause: {code: -32026}}});
     expect(transport.messages.filter(({message}) => 'method' in message && message.method === 'events/list')).toHaveLength(2);
   });
 

@@ -85,6 +85,49 @@ for (const persistent of [false, true]) {
   });
 }
 
+test('weather reference: push backs off repeated schema terminations and recovers real readings', {timeout: 20_000}, async t => {
+  const server = await startWeatherServer({port: 0, intervalMs: 0});
+  const streams = [];
+  let catalogs = 0;
+  let initialCursor;
+  let realStreamActive = false;
+  const wire = new EventsWire(() => createHttpTransport(new URL(server.url), {fetch: async (url, init) => {
+    const request = JSON.parse(init.body);
+    if (request.method === 'events/list') catalogs++;
+    if (request.method === 'events/stream') {
+      streams.push({at: performance.now(), cursor: request.params.cursor});
+      if (streams.length <= 3) {
+        const notification = (kind, params) => ({jsonrpc: '2.0', method: `notifications/events/${kind}`,
+          params: {...params, _meta: {'io.modelcontextprotocol/subscriptionId': request.id}}});
+        const messages = [notification('active', {cursor: initialCursor, truncated: false}),
+          notification('heartbeat', {cursor: initialCursor}),
+          notification('terminated', {error: {code: -32026, message: 'Injected schema change', data: {feature: 'payloadSchema', reason: 'schema_changed'}}})];
+        return new Response(messages.map(message => `data: ${JSON.stringify(message)}\n\n`).join(''), {headers: {'content-type': 'text/event-stream'}});
+      }
+    }
+    return fetch(url, init);
+  }}));
+  const client = new EventsClient(wire, {retryMs: 40, maxRetries: 2});
+  t.after(async () => { await client.close(); await server.close(); });
+  await client.connect();
+  initialCursor = (await wire.request('events/poll', {name: 'weather.reading', arguments: {}, cursor: null}, result)).cursor;
+  const observations = [];
+  const watch = client.watch({name: 'weather.reading', arguments: {}, mode: 'push', cursor: initialCursor}, item => { observations.push(item); },
+    () => { if (streams.length === 4) realStreamActive = true; });
+  await watch.ready;
+  await until(() => realStreamActive);
+  assert.equal(streams.length, 4);
+  assert.equal(catalogs, 4);
+  assert.ok(streams[2].at - streams[1].at >= 39, 'first repeated schema recovery backs off');
+  assert.ok(streams[3].at - streams[2].at >= 79, 'second repeated schema recovery doubles the delay');
+  assert.deepEqual(streams.map(stream => stream.cursor), [initialCursor, null, null, null]);
+  assert.equal(observations.filter(item => item.type === 'gap').length, 3);
+  const reading = server.advance()[0];
+  await until(() => observations.some(item => item.type === 'event' && item.event.eventId === reading.eventId));
+  assert.equal(watch.status, 'active');
+  await watch.stop();
+});
+
 for (const fault of ['stalled-page', 'quota']) {
   test(`weather reference: polling backs off ${fault} responses and recovers real readings`, {timeout: 20_000}, async t => {
     const server = await startWeatherServer({port: 0, intervalMs: 0});
