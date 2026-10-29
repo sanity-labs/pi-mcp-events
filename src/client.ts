@@ -283,10 +283,17 @@ export class EventsClient {
     const push = async () => {
       let rediscovered = false;
       while (!signal.aborted) {
-        await retry(async () => {
+        await retryOperation(async () => {
           this.contract(options);
-          let progressed = false;
-          const progress = () => { progressed = true; rediscovered = false; currentStatus = 'active'; };
+          let firstProgressAt: number | undefined;
+          let healthy = false;
+          const progress = () => {
+            const now = performance.now();
+            firstProgressAt ??= now;
+            healthy = now - firstProgressAt >= this.settings.heartbeatMs * 2;
+            rediscovered = false;
+            currentStatus = 'active';
+          };
           try {
             await streamEvents(this.wire, {
               name: options.name, arguments: options.arguments, cursor,
@@ -315,12 +322,11 @@ export class EventsClient {
               return;
             }
             const normalized = normalizeRequestError(error);
-            if (progressed && retryable(normalized) && this.settings.maxRetries > 0) return;
+            if (healthy && retryable(normalized) && this.settings.maxRetries > 0) return;
             throw normalized;
           }
-        });
+        }, {...this.settings, signal, randomize: true, onRetry: () => status('retrying')});
         await status('retrying');
-        await delay(this.settings.retryMs, {signal});
       }
     };
     const webhook = async () => {

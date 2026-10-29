@@ -193,6 +193,12 @@ Relative `cwd`, `stateDir`, and TLS file paths resolve from the configuration fi
 
 Polling drains available pages immediately while the cursor advances or new events arrive. If a server repeatedly claims more events are available without making progress, or returns `ResourceExhausted`, the watch backs off with jitter. Retry delays start at the larger of `retryMs` and `pollFloorMs`, double up to 30 seconds (or a higher configured floor), and stop after `maxRetries`. Successful pages reset the retry budget. The watch retains its cursor; use `/mcp-events start <watchId>` to restart it after retries are exhausted.
 
+### Push streams
+
+If a connection fails, the client finishes delivering events it has already received before reconnecting. This applies to disk-backed and in-memory sessions, including event types with no replay cursor. Explicitly stopping a watch cancels further delivery.
+
+Repeated short-lived streams reconnect with exponential backoff and jitter, capped at 30 seconds and bounded by `maxRetries`. The retry budget resets after accepted events or heartbeats span two configured heartbeat intervals, including on quiet streams. The client assumes a 30-second heartbeat interval by default (`heartbeatMs`); events and heartbeats refresh liveness, while repeated `active` confirmations only update cursor and gap state.
+
 ### Webhooks
 
 Add a top-level `webhook` section and set the watch's `mode` to `webhook`:

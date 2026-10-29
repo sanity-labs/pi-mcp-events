@@ -14,9 +14,13 @@ const event = (eventId: string, cursor = eventId) => ({
   eventId, cursor, name: descriptor.name, timestamp: '2026-10-25T12:00:00Z', data: {value: 1},
 });
 const cleanups: Array<() => Promise<void>> = [];
-beforeEach(() => vi.useFakeTimers());
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, 'random').mockReturnValue(0);
+});
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map(close => close()));
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 const flush = () => vi.advanceTimersByTimeAsync(0);
@@ -192,7 +196,7 @@ describe('event streaming', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each(['disconnect', 'complete'])('resumes at the accepted cursor after %s, resetting retries only on events or heartbeats', async ending => {
+  it.each(['disconnect', 'complete'])('resumes at the accepted cursor after %s and resets retries after sustained health', async ending => {
     const {client, transport, requests, active, disconnect} = setup({maxRetries: 1});
     await client.connect();
     const accepted = vi.fn();
@@ -205,6 +209,11 @@ describe('event streaming', () => {
       transport.notify(request, 'event', event('replayed'));
       transport.notify(request, 'heartbeat', {cursor: `position-${i}`});
       await flush();
+      for (let beat = 0; beat < 2; beat++) {
+        await vi.advanceTimersByTimeAsync(100);
+        transport.notify(request, 'heartbeat', {cursor: `position-${i}`});
+        await flush();
+      }
       if (ending === 'disconnect') disconnect(request);
       else transport.respond(request, {});
       await vi.advanceTimersByTimeAsync(10);

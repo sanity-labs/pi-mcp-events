@@ -80,6 +80,33 @@ describe('MCP wire adapter in isolation', () => {
     await expect(stream).resolves.toBeUndefined();
   });
 
+  it('closes old draining streams after the wire reconnects on a replacement transport', async () => {
+    const transports: TestTransport[] = [];
+    const wire = new EventsWire(() => {
+      const transport = new TestTransport();
+      transports.push(transport);
+      transport.handle = request => {
+        transport.notify(request, 'active', {cursor: null, truncated: false});
+        transport.notify(request, 'event', {eventId: 'queued'});
+      };
+      return transport;
+    });
+    cleanups.push(() => wire.close());
+    await wire.connect();
+    const gate = Promise.withResolvers<void>();
+    const received = vi.fn(() => gate.promise);
+    const stream = wire.stream('events/stream', {name: 'example.changed'}, new AbortController().signal, received);
+    const closed = expect(stream).rejects.toThrow('MCP Events client closed');
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+    await transports[0]!.close();
+    await wire.connect();
+    expect(transports).toHaveLength(2);
+    await wire.close();
+    gate.resolve();
+    await closed;
+    expect(received).toHaveBeenCalledOnce();
+  });
+
   it('correlates concurrent streams and cancels only the aborted request', async () => {
     const transport = new TestTransport();
     const wire = new EventsWire(transport);

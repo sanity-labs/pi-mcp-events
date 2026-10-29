@@ -10,7 +10,7 @@ import {z} from 'zod';
 import {startWeatherServer} from '../dev/weather-server.mjs';
 import {cliPath, modelPath, root, RpcClient} from './fixtures/installed-package.mjs';
 
-const {EventsClient, EventsWire, createHttpTransport} = await import(pathToFileURL(join(root, 'dist/index.js')).href);
+const {EventsClient, EventsWire, SessionState, createHttpTransport} = await import(pathToFileURL(join(root, 'dist/index.js')).href);
 const result = z.object({}).passthrough();
 async function until(check) {
   const deadline = Date.now() + 10_000;
@@ -28,6 +28,61 @@ async function setup(t, options) {
     name: 'weather.reading', arguments: {}, cursor, ...extra,
   }, result);
   return {server, client, wire, poll, setTime(value) { seconds = value; }};
+}
+
+for (const persistent of [false, true]) {
+  test(`weather reference: push drains a closed connection into ${persistent ? 'disk-backed' : 'in-memory'} state`, {timeout: 20_000}, async t => {
+    const server = await startWeatherServer({port: 0, intervalMs: 0});
+    const directory = mkdtempSync(join(tmpdir(), 'pi-events-push-weather-'));
+    const path = persistent ? join(directory, 'state.json') : undefined;
+    const state = new SessionState(path);
+    const gate = Promise.withResolvers();
+    const transports = [];
+    let received = 0;
+    const wire = new EventsWire(() => {
+      const transport = createHttpTransport(new URL(server.url));
+      const start = transport.start.bind(transport);
+      transport.start = async () => {
+        const receive = transport.onmessage;
+        transport.onmessage = (message, extra) => {
+          if (message.method === 'notifications/events/event') received++;
+          receive?.(message, extra);
+        };
+        await start();
+      };
+      transports.push(transport);
+      return transport;
+    });
+    const client = new EventsClient(wire, {retryMs: 10});
+    t.after(async () => {
+      gate.resolve();
+      await client.close();
+      await server.close();
+      rmSync(directory, {recursive: true, force: true});
+    });
+    await client.connect();
+    let blocked = false;
+    const watch = client.watch({name: 'weather.reading', arguments: {}, mode: 'push'}, async observation => {
+      if (observation.type !== 'event') return;
+      if (!blocked) { blocked = true; await gate.promise; }
+      state.accept({server: 'weather', watch: 'readings', observation});
+    }, cursor => { state.setCursor('readings', cursor); });
+    await watch.ready;
+    const readings = Array.from({length: 3}, () => server.advance()[0]);
+    await until(() => received === 3);
+    await transports[0].close();
+    assert.equal(state.size, 0);
+    gate.resolve();
+    await until(() => state.size === 3 && transports.length === 2 && watch.status === 'active');
+    assert.deepEqual(state.snapshot().map(item => item.observation.event.eventId), readings.map(event => event.eventId));
+    if (path) assert.deepEqual(new SessionState(path).snapshot(), state.snapshot());
+    const previousCursor = state.getCursor('readings');
+    const [next] = server.advance();
+    await until(() => state.size === 4 && state.getCursor('readings') !== previousCursor);
+    assert.equal(state.snapshot()[3].observation.event.eventId, next.eventId);
+    assert.equal(state.getCursor('readings'), watch.cursor);
+    await watch.stop();
+  });
 }
 
 for (const fault of ['stalled-page', 'quota']) {

@@ -12,6 +12,7 @@ import {
 type Stream = {
   receive(message: JSONRPCMessage): void;
   end(error?: unknown): void;
+  disconnect(error: unknown): void;
 };
 
 export function nameHeader(name: string): string {
@@ -45,6 +46,7 @@ class EventsTransport implements Transport {
   onmessage?: Transport['onmessage'];
   onclose?: Transport['onclose'];
   onerror?: Transport['onerror'];
+  private closed = false;
   private readonly disconnected: () => void;
   constructor(raw: Transport, disconnected: () => void) { this.raw = raw; this.disconnected = disconnected; }
   get hasPerRequestStream() { return this.raw.hasPerRequestStream; }
@@ -65,8 +67,10 @@ class EventsTransport implements Transport {
     };
     this.raw.onerror = error => this.onerror?.(error);
     this.raw.onclose = () => {
+      if (this.closed) return;
+      this.closed = true;
       this.disconnected();
-      for (const stream of this.streams.values()) stream.end(new Error('MCP connection closed'));
+      for (const stream of this.streams.values()) stream.disconnect(new Error('MCP connection closed'));
       this.onclose?.();
     };
     await this.raw.start();
@@ -82,6 +86,7 @@ class EventsTransport implements Transport {
 
 export class EventsWire {
   readonly client: Client;
+  private readonly streams = new Set<Stream>();
   private transport: EventsTransport;
   private readonly factory?: () => Transport;
   private connected = false;
@@ -99,7 +104,10 @@ export class EventsWire {
     });
   }
   private wrap(transport: Transport) {
-    return new EventsTransport(transport, () => { this.connected = false; });
+    const wrapped = new EventsTransport(transport, () => {
+      if (this.transport === wrapped) this.connected = false;
+    });
+    return wrapped;
   }
   connect(signal?: AbortSignal): Promise<Record<string, unknown>> {
     if (this.closed) return Promise.reject(new Error('MCP Events client is closed'));
@@ -150,32 +158,42 @@ export class EventsWire {
   ): Promise<void> {
     await this.ensureConnected();
     signal.throwIfAborted();
+    const transport = this.transport;
     const id = `pi-events:${randomUUID()}`;
     const requestAbort = new AbortController();
     const done = Promise.withResolvers<void>();
     let ended = false;
+    let accepting = true;
     let queued = 0;
     let bytes = 0;
     let writes = Promise.resolve();
     const end = (error?: unknown) => {
       if (ended) return;
       ended = true;
-      this.transport.streams.delete(id);
+      accepting = false;
+      transport.streams.delete(id);
+      this.streams.delete(stream);
       requestAbort.abort();
       signal.removeEventListener('abort', abort);
       if (error === undefined) done.resolve();
       else done.reject(error);
     };
+    const disconnect = (error: unknown) => {
+      if (!accepting) return;
+      accepting = false;
+      void writes.then(() => end(error));
+    };
     const cancel = () => {
       requestAbort.abort();
-      if (!this.transport.hasPerRequestStream) {
+      if (!transport.hasPerRequestStream && transport === this.transport) {
         void this.client.notification({method: 'notifications/cancelled', params: {requestId: id}}).catch(() => {});
       }
     };
     const abort = () => { cancel(); end(signal.reason); };
-    this.transport.streams.set(id, {
-      end,
+    const stream: Stream = {
+      end, disconnect,
       receive: message => {
+        if (!accepting) return;
         const size = Buffer.byteLength(JSON.stringify(message));
         if (++queued > 100 || (bytes += size) > 256 * 1024) {
           cancel();
@@ -193,19 +211,21 @@ export class EventsWire {
           }
         }).catch(error => { cancel(); end(error); }).finally(() => { queued--; bytes -= size; });
       },
-    });
+    };
+    this.streams.add(stream);
+    transport.streams.set(id, stream);
     signal.addEventListener('abort', abort, {once: true});
     const meta = {
       'io.modelcontextprotocol/protocolVersion': PROTOCOL_VERSION,
       'io.modelcontextprotocol/clientInfo': clientInfo,
       'io.modelcontextprotocol/clientCapabilities': clientCapabilities,
     };
-    void this.transport.send({jsonrpc: '2.0', id, method, params: {...params, _meta: meta}}, {
+    void transport.send({jsonrpc: '2.0', id, method, params: {...params, _meta: meta}}, {
       requestSignal: requestAbort.signal,
       onRequestStreamEnd: () => {
-        void writes.then(() => end(new Error('Event stream disconnected')));
+        disconnect(new Error('Event stream disconnected'));
       },
-    }).catch(end);
+    }).catch(disconnect);
     try { await done.promise; }
     finally { await writes; }
   }
@@ -213,7 +233,7 @@ export class EventsWire {
   async close() {
     this.closed = true;
     this.connected = false;
-    for (const stream of this.transport.streams.values()) stream.end(new Error('MCP Events client closed'));
+    for (const stream of this.streams) stream.end(new Error('MCP Events client closed'));
     await this.client.close();
   }
 }
