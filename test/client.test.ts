@@ -72,13 +72,13 @@ describe('event discovery', () => {
     transport.respond(pages[1]!, {events: [{...descriptor, name: 'b'}]});
     expect((await first).map(item => item.name)).toEqual(['a', 'b']);
   });
-  it.each(['duplicate', 'cursor-loop', 'invalid-schema'])('keeps the previous catalog after %s discovery fails', async kind => {
+  it.each(['duplicate', 'cursor-loop', 'malformed-descriptor'])('keeps the previous catalog after %s discovery fails', async kind => {
     const {client, transport} = setup();
     await client.connect();
     transport.handle = request => {
       if (kind === 'duplicate') transport.respond(request, {events: [descriptor, descriptor]});
       if (kind === 'cursor-loop') transport.respond(request, {events: [], nextCursor: 'same'});
-      if (kind === 'invalid-schema') transport.respond(request, {events: [{...descriptor, payloadSchema: {type: 'invalid'}}]});
+      if (kind === 'malformed-descriptor') transport.respond(request, {events: [{...descriptor, payloadSchema: null}]});
     };
     await expect(client.refresh()).rejects.toThrow();
     expect(client.list()).toEqual([descriptor]);

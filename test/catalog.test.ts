@@ -34,6 +34,31 @@ function setup(settings: ClientOptions = {}) {
 }
 
 describe('automatic catalog updates', () => {
+  it('keeps catalog monitoring and supported watches working through schema failures and repairs', async () => {
+    const h = setup();
+    await h.client.connect(); await flush(); h.acknowledge(); await h.client.catalogUpdates!.ready;
+    let events = [descriptor, {...descriptor, name: 'unavailable', payloadSchema: {$schema: 'https://example.com/schema'}}];
+    const polls: JSONRPCRequest[] = [];
+    h.transport.handle = request => {
+      if (request.method === 'events/list') h.transport.respond(request, {events});
+      else polls.push(request);
+    };
+    const watch = h.client.watch({name: descriptor.name, arguments: {}, mode: 'poll'}, () => {});
+    await flush();
+    h.transport.respond(polls[0]!, {events: [], cursor: 'quiet', truncated: false, hasMore: false, nextPollMs: 100_000});
+    await watch.ready;
+    h.transport.notify(h.listeners[0]!, 'list_changed', {});
+    await flush();
+    expect(h.client.catalogIssues.map(issue => issue.name)).toEqual(['unavailable']);
+    expect(watch.status).toBe('active');
+    events = [descriptor];
+    h.transport.notify(h.listeners[0]!, 'list_changed', {});
+    await flush();
+    expect(h.client.catalogIssues).toEqual([]);
+    expect(h.client.list()).toEqual([descriptor]);
+    expect(h.listeners).toHaveLength(1);
+    expect(watch.status).toBe('active');
+  });
   it('opens one subscription for concurrent connects only when listChanged is advertised', async () => {
     const {client, transport, listeners} = setup();
     transport.listChanged = false;

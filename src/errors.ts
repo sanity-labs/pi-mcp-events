@@ -7,6 +7,7 @@ export const EventsClientErrorCode = {
   StateWriteFailed: 'STATE_WRITE_FAILED',
   InvalidOptions: 'INVALID_OPTIONS',
   InvalidCatalog: 'INVALID_CATALOG',
+  UnsupportedEventSchema: 'UNSUPPORTED_EVENT_SCHEMA',
   InvalidArguments: 'INVALID_ARGUMENTS',
   InvalidEvent: 'INVALID_EVENT',
   EventNotFound: 'EVENT_NOT_FOUND',

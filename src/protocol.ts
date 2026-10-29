@@ -38,13 +38,14 @@ export const record = z.record(z.string(), z.unknown());
 export const cursor = z.string().nullable().optional().transform(value => value ?? null);
 export const deliveryMode = z.enum(['poll', 'push', 'webhook']);
 export type DeliveryMode = z.infer<typeof deliveryMode>;
+const jsonSchema = z.union([z.boolean(), record]);
 
 export const descriptor = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   delivery: z.array(deliveryMode).min(1),
-  inputSchema: record,
-  payloadSchema: record,
+  inputSchema: jsonSchema,
+  payloadSchema: jsonSchema,
   _meta: record.optional(),
 });
 export type EventDescriptor = z.infer<typeof descriptor>;

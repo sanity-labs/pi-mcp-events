@@ -9,6 +9,18 @@ const contract = {
 };
 
 describe('pinned event contracts', () => {
+  it.each([true, false])('applies boolean input and payload schemas: %s', accepts => {
+    const advertised = descriptor.parse({...contract, inputSchema: accepts, payloadSchema: accepts});
+    const schema = new EventContract(advertised);
+    const event = occurrence.parse({eventId: 'e', name: contract.name, timestamp: new Date().toISOString(), data: {anything: [1, 'two']}});
+    if (accepts) {
+      expect(() => schema.arguments({anything: true})).not.toThrow();
+      expect(() => schema.event(event)).not.toThrow();
+    } else {
+      expect(() => schema.arguments({})).toThrow('inputSchema');
+      expect(() => schema.event(event)).toThrow('payloadSchema');
+    }
+  });
   it('normalizes absent cursors and preserves array order in subscription identity', () => {
     expect(pollResult.parse({events: [], truncated: false, hasMore: false, nextPollMs: 1000}).cursor).toBeNull();
     expect(canonical({b: [2, 1], a: {y: 2, x: 1}})).toBe(canonical({a: {x: 1, y: 2}, b: [2, 1]}));

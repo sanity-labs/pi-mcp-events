@@ -6,9 +6,9 @@ import type {EventDescriptor, EventOccurrence} from './protocol.ts';
 
 const addFormats = formatsModule.default ?? formatsModule;
 
-function compile(schema: Record<string, unknown>): ValidateFunction {
+function compile(schema: EventDescriptor['inputSchema']): ValidateFunction {
   const options = {strict: false, allErrors: false, validateFormats: true, addUsedSchema: false};
-  const dialect = schema.$schema;
+  const dialect = typeof schema === 'boolean' ? undefined : schema.$schema;
   let ajv;
   if (dialect === 'http://json-schema.org/draft-07/schema#') ajv = new AjvDraft7(options);
   else if (dialect === 'https://json-schema.org/draft/2019-09/schema') ajv = new Ajv2019(options);

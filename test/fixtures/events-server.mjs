@@ -22,7 +22,7 @@ const schema = {
 };
 
 // Synthetic test server only. It accepts callbacks solely through its own loopback TLS proxy.
-export async function startFixture(tls, {catalogUpdates = false} = {}) {
+export async function startFixture(tls, {catalogUpdates = false, extraEvents = []} = {}) {
   const reservation = createTcpServer();
   const callbackPort = await listen(reservation);
   await close(reservation);
@@ -121,7 +121,7 @@ export async function startFixture(tls, {catalogUpdates = false} = {}) {
         return;
       }
       case 'events/list':
-        reply({events: [{name: 'example.changed', delivery: ['poll', 'push'], ...schema}, {name: 'example.live_changed', delivery: ['webhook'], ...schema}]});
+        reply({events: [{name: 'example.changed', delivery: ['poll', 'push'], ...schema}, {name: 'example.live_changed', delivery: ['webhook'], ...schema}, ...extraEvents]});
         return;
       case 'events/poll': {
         const {events, cursor, truncated, hasMore} = history.read({
@@ -171,6 +171,10 @@ export async function startFixture(tls, {catalogUpdates = false} = {}) {
     return {
       connection: {baseUrl, url: `${baseUrl}/mcp`, token, callbackOrigin, callbackPort, callbackTls: false, webhookEventName: 'example.live_changed', webhookReplay: false},
       requests,
+      setExtraEvents(events) {
+        extraEvents = events;
+        for (const stream of catalogs) notify(stream, 'list_changed', {});
+      },
       failCatalogUpdates() {
         for (const stream of catalogs) stream.response.end(`data: ${JSON.stringify({jsonrpc: '2.0', id: stream.id,
           error: {code: -32024, message: 'Catalog access revoked: private-test-detail'},
