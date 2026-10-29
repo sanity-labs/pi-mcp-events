@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto';
+import {boundedResponse, defaultResponseLimits, type ResponseLimits} from './http-limits.ts';
 import {
   Client, type JSONRPCMessage, type Transport, type TransportSendOptions,
   type StandardSchemaV1, type RequestOptions, StreamableHTTPClientTransport,
@@ -14,6 +15,12 @@ type Stream = {
   end(error?: unknown): void;
   disconnect(error: unknown): void;
 };
+type HttpState = ResponseLimits & {ceilings: Partial<ResponseLimits>; onLimit?(id: unknown, error: Error): void};
+const httpStates = new WeakMap<Transport, HttpState>();
+function applyResponseLimits(state: HttpState, limits?: ResponseLimits) {
+  if (!limits) return;
+  for (const key of ['maxResponseBytes', 'maxPollBytes'] as const) state[key] = Math.min(limits[key], state.ceilings[key] ?? Infinity);
+}
 
 export function nameHeader(name: string): string {
   if (name.length > 0 && name.trim() === name && /^[\x09\x20-\x7e]+$/.test(name)
@@ -21,12 +28,23 @@ export function nameHeader(name: string): string {
   return `=?base64?${Buffer.from(name).toString('base64')}?=`;
 }
 
-export function createHttpTransport(url: URL, options: StreamableHTTPClientTransportOptions = {}) {
+export function createHttpTransport(url: URL, options: StreamableHTTPClientTransportOptions & Partial<ResponseLimits> = {}) {
   const baseFetch = options.fetch ?? fetch;
-  return new StreamableHTTPClientTransport(url, {...options, fetch: async (input, init) => {
+  const state: HttpState = {...defaultResponseLimits, ceilings: {}};
+  for (const key of ['maxResponseBytes', 'maxPollBytes'] as const) {
+    const value = options[key];
+    if (value !== undefined) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error('Invalid HTTP response limit');
+      state[key] = value;
+      state.ceilings[key] = value;
+    }
+  }
+  const transport = new StreamableHTTPClientTransport(url, {...options, fetch: async (input, init) => {
+    let request: Record<string, unknown> | undefined;
     if (typeof init?.body === 'string') {
       const message: unknown = JSON.parse(init.body);
       const parsed = record.safeParse(message);
+      if (parsed.success) request = parsed.data;
       if (parsed.success && typeof parsed.data.method === 'string' && parsed.data.method.startsWith('events/')) {
         const headers = new Headers(init.headers);
         const params = record.safeParse(parsed.data.params);
@@ -35,8 +53,14 @@ export function createHttpTransport(url: URL, options: StreamableHTTPClientTrans
         init = {...init, headers};
       }
     }
-    return baseFetch(input, init);
+    const response = await baseFetch(input, init);
+    const limit = request?.method === EventMethod.Poll ? Math.min(state.maxPollBytes, state.maxResponseBytes) : state.maxResponseBytes;
+    const hasRequest = typeof request?.method === 'string' && (typeof request.id === 'string' || typeof request.id === 'number');
+    const allowStreaming = init?.method?.toUpperCase() === 'GET' || hasRequest;
+    return boundedResponse(response, limit, Math.min(256 * 1024, limit), error => state.onLimit?.(request?.id, error), allowStreaming);
   }});
+  httpStates.set(transport, state);
+  return transport;
 }
 
 /** Intercepts only extension-owned stream IDs; ordinary SDK traffic passes through. */
@@ -94,6 +118,7 @@ export class EventsWire {
   private extension?: Record<string, unknown>;
   private closed = false;
   private connecting?: Promise<Record<string, unknown>>;
+  private responseLimits?: ResponseLimits;
   private connectionSignal?: AbortSignal;
   constructor(transport: Transport | (() => Transport)) {
     this.factory = typeof transport === 'function' ? transport : undefined;
@@ -107,7 +132,19 @@ export class EventsWire {
     const wrapped = new EventsTransport(transport, () => {
       if (this.transport === wrapped) this.connected = false;
     });
+    const http = httpStates.get(transport);
+    if (http) {
+      applyResponseLimits(http, this.responseLimits);
+      http.onLimit = (id, error) => {
+        if (typeof id === 'string') wrapped.streams.get(id)?.disconnect(error);
+      };
+    }
     return wrapped;
+  }
+  setResponseLimits(limits: ResponseLimits) {
+    this.responseLimits = {maxResponseBytes: limits.maxResponseBytes, maxPollBytes: limits.maxPollBytes};
+    const http = httpStates.get(this.transport.raw);
+    if (http) applyResponseLimits(http, this.responseLimits);
   }
   connect(signal?: AbortSignal): Promise<Record<string, unknown>> {
     if (this.closed) return Promise.reject(new Error('MCP Events client is closed'));

@@ -20,5 +20,6 @@ export const clientSettingsSchema = z.object({
   maxCatalogEntries: z.number().int().positive().default(1000),
   maxCatalogPages: z.number().int().positive().default(100),
   maxPollBytes: z.number().int().positive().default(256 * 1024),
+  maxResponseBytes: z.number().int().positive().default(1024 * 1024),
   maxTrackedEventIds: z.number().int().positive().default(4096),
 });

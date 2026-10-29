@@ -56,6 +56,7 @@ export type ClientOptions = {
   maxCatalogEntries?: number;
   maxCatalogPages?: number;
   maxPollBytes?: number;
+  maxResponseBytes?: number;
   maxTrackedEventIds?: number;
 };
 const clientSchema = clientSettingsSchema.extend({webhookReceiver: z.instanceof(WebhookReceiver).optional()});
@@ -91,6 +92,7 @@ export class EventsClient {
     const parsed = clientSchema.safeParse(settings);
     if (!parsed.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid MCP Events client options', {cause: parsed.error});
     this.settings = parsed.data;
+    this.wire.setResponseLimits(this.settings);
   }
   async connect() {
     this.assertOpen();
