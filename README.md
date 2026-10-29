@@ -287,6 +287,8 @@ npm ci
 npm run validate
 ```
 
+Builds and type checks use TypeScript 7 through the `@typescript/native` npm alias. ESLint uses the TypeScript 6 API through the `typescript` compatibility alias, following [Microsoft's side-by-side setup](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-6-0).
+
 ## Stability
 
 `pi-mcp-events` is an early release. Expect public APIs to change frequently. MCP Events spec is an evolving draft.

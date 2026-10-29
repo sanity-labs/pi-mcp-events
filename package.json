@@ -50,10 +50,11 @@
     "@modelcontextprotocol/node": "2.1.2",
     "@modelcontextprotocol/server": "2.4.0",
     "@types/node": "24.10.1",
+    "@typescript/native": "npm:typescript@7.0.2",
     "eslint": "10.13.0",
     "fast-check": "4.10.2",
     "globals": "17.13.0",
-    "typescript": "7.0.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-eslint": "8.72.0",
     "vitest": "4.1.12"
   },
