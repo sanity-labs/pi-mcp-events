@@ -45,6 +45,7 @@ describe('configuration', () => {
     {watches: [{...watch, server: 'toString'}]},
     {watches: [{...watch, mode: 'webhook'}]},
     {client: {maxSubscriptions: 0}}, {client: {maxRetires: 2}},
+    {watches: [{...watch, webhookIdentity: {routeId: 'hand-picked', secret: 'hand-picked'}}]},
     {watches: [{...watch, typo: true}]}, {typo: true},
     {servers: {example: {transport: 'http', url: servers.example.url, command: 'unused'}}},
     {servers: {example: {transport: 'stdio', command: ''}}},

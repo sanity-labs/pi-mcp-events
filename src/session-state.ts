@@ -1,3 +1,4 @@
+import {WebhookIdentities} from './webhook-identities.ts';
 import {EventsClientError, EventsClientErrorCode as ErrorCode} from './errors.ts';
 import {Checkpoints, Inbox, type CheckpointOptions, type InboxItem, type InboxOptions} from './inbox.ts';
 
@@ -17,6 +18,7 @@ export type SessionStateOptions = {
 export class SessionState {
   private inbox: Inbox;
   private checkpoints: Checkpoints;
+  private identities: WebhookIdentities;
   private persistence: 'memory' | 'persistent' | 'degraded';
   private persistenceWarning?: PersistenceWarning;
   private readonly onWarning?: SessionStateOptions['onWarning'];
@@ -24,17 +26,27 @@ export class SessionState {
   constructor(path?: string, options: SessionStateOptions = {}) {
     this.inbox = new Inbox(undefined, options.inbox);
     this.checkpoints = new Checkpoints(undefined, options.checkpoints);
+    this.identities = new WebhookIdentities(undefined, options.checkpoints);
     this.onWarning = options.onWarning;
     this.persistence = path === undefined ? 'memory' : 'persistent';
     if (path === undefined) return;
-    try {
+    let readError: EventsClientError | undefined;
+    const restore = (operation: () => void) => {
+      try { operation(); }
+      catch (error) {
+        if (!(error instanceof EventsClientError) || ![
+          ErrorCode.InvalidState, ErrorCode.StateReadFailed, ErrorCode.LimitExceeded,
+        ].some(code => code === error.code)) throw error;
+        readError ??= error;
+      }
+    };
+    restore(() => {
       this.inbox = new Inbox(path, options.inbox);
       this.checkpoints = new Checkpoints(`${path}.cursors.json`, options.checkpoints);
-    } catch (error) {
-      if (!(error instanceof EventsClientError) || ![
-        ErrorCode.InvalidState, ErrorCode.StateReadFailed, ErrorCode.LimitExceeded,
-      ].some(code => code === error.code)) throw error;
-      this.degrade(error, 'read');
+    });
+    restore(() => { this.identities = new WebhookIdentities(`${path}.webhooks.json`, options.checkpoints); });
+    if (readError) {
+      this.degrade(readError, 'read');
       this.notify();
     }
   }
@@ -52,6 +64,15 @@ export class SessionState {
     this.mutate(() => this.checkpoints.retain(active));
   }
 
+  webhookIdentity(key: string) {
+    this.mutate(() => this.identities.ensure(key));
+    return this.identities.get(key)!;
+  }
+  retainWebhookIdentities(keys: Iterable<string>) {
+    const active = [...keys];
+    this.mutate(() => this.identities.retain(active));
+  }
+
   private mutate(operation: () => void) {
     try { operation(); }
     catch (error) {
@@ -66,6 +87,7 @@ export class SessionState {
   private degrade(error: EventsClientError, operation: PersistenceWarning['operation']) {
     this.inbox = this.inbox.toMemory();
     this.checkpoints = this.checkpoints.toMemory();
+    this.identities = this.identities.toMemory();
     this.persistence = 'degraded';
     const reason = operation === 'read'
       ? 'MCP Events could not restore saved state. Some pending events or resume progress may be unavailable.'

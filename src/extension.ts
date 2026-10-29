@@ -77,6 +77,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
         watch.mode === 'webhook' ? config.webhook?.publicUrl : null,
       ]);
       state.retainCursors(config.watches.map(identity));
+      state.retainWebhookIdentities(config.watches.filter(watch => watch.mode === 'webhook').map(identity));
       const connection = (server: string) => {
         const existing = session.clients.get(server);
         if (existing) return existing;
@@ -117,7 +118,8 @@ export default function mcpEvents(pi: ExtensionAPI) {
           } catch { entry.failure = 'connection failed'; return; }
           if (session.closed) return;
           try {
-            const watch = client.watch({...configured, cursor: state.getCursor(key),
+            const webhookIdentity = configured.mode === 'webhook' ? state.webhookIdentity(key) : undefined;
+            const watch = client.watch({...configured, webhookIdentity, cursor: state.getCursor(key),
               ttlMs: state.mode !== 'persistent' && configured.ttlMs === null ? undefined : configured.ttlMs,
             }, observation => {
               if (session.closed) throw new Error('Pi session changed');

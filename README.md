@@ -213,7 +213,7 @@ Add a top-level `webhook` section and set the watch's `mode` to `webhook`:
 }
 ```
 
-Replace `publicUrl` with your HTTPS origin and path. Forward it to your local receiver, preserving the path and raw request body. `pi-mcp-events` adds a unique route beneath `publicUrl` for each subscription, creates signing secrets, and verifies webhook signatures.
+Replace `publicUrl` with your HTTPS origin and path. Forward it to your local receiver, preserving the path and raw request body. `pi-mcp-events` adds a unique route beneath `publicUrl` for each subscription, creates signing secrets, and verifies webhook signatures. Saved sessions restore their callback routes and signing secrets after restart to renew the same remote subscriptions. These secrets are stored in private state files. Lease renewal continues while event delivery or checkpointing is slow.
 
 >The public URL must not contain credentials, a query, or a fragment.
 

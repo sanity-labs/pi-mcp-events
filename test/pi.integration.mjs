@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {once} from 'node:events';
 import {execFileSync} from 'node:child_process';
 import {existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -38,7 +39,7 @@ function files(path) {
     return [full.slice(path.length), readFileSync(full, 'utf8')];
   }));
 }
-async function setup(t, {ephemeral = true, override = true, blocked = false, catalogUpdates = false, extraEvents = [], configure = config => config} = {}) {
+async function setup(t, {ephemeral = true, override = true, blocked = false, catalogUpdates = false, extraEvents = [], noExpiryWebhooks = false, configure = config => config} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-events-cli-'));
   const agentDir = join(directory, 'agent'); mkdirSync(agentDir);
   execFileSync(process.execPath, [cliPath, 'install', root], {
@@ -46,7 +47,7 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, cat
   });
   const key = join(directory, 'key.pem'); const cert = join(directory, 'cert.pem');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'], {stdio: 'ignore'});
-  const fixture = await startFixture({key: readFileSync(key), cert: readFileSync(cert)}, {catalogUpdates, extraEvents});
+  const fixture = await startFixture({key: readFileSync(key), cert: readFileSync(cert)}, {catalogUpdates, extraEvents, noExpiryWebhooks});
   const stateDir = override ? join(directory, 'custom-state') : join(agentDir, 'mcp-events');
   if (blocked) writeFileSync(stateDir, 'not a directory');
   else { mkdirSync(stateDir); if (ephemeral) writeFileSync(join(stateDir, 'saved-state.json'), 'preserve existing saved-session state'); }
@@ -104,7 +105,15 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, cat
     await delay(1100);
     assert.equal(fixture.requests.filter(r => r.method === 'events/poll').length, count, 'polling stops');
   };
-  return {directory, agentDir, stateDir, fixture, start, emit, received, accepted, hold, shutdown, contexts, release};
+  const crash = async () => {
+    const child = rpc.process;
+    const exited = once(child, 'exit');
+    child.kill('SIGKILL');
+    await exited;
+    rpc = undefined;
+    await until(() => fixture.stats().streams === 0, 'crash closes streams');
+  };
+  return {directory, agentDir, stateDir, fixture, start, crash, emit, received, accepted, hold, shutdown, contexts, release};
 }
 
 test('unsupported event schemas leave other watches working and can be retried after repair', {timeout: 45_000}, async t => {
@@ -371,8 +380,31 @@ test('saved Pi session restores cursors and pending events after resume', {timeo
   await h.shutdown();
 });
 
+test('saved Pi session renews the same no-expiry webhook after a crash', {timeout: 60_000}, async t => {
+  const h = await setup(t, {ephemeral: false, noExpiryWebhooks: true,
+    configure: config => ({...config, client: {...config.client, webhookRefreshMs: 100}})});
+  let rpc = await h.start();
+  writeFileSync(h.release, 'continue'); await ordinaryTool(rpc);
+  const sessionFile = (await rpc.getState()).sessionFile; assert.ok(sessionFile);
+  const initial = h.fixture.requests.find(r => r.method === 'events/subscribe').params;
+  assert.equal(initial.ttlMs, null);
+  await h.crash();
+  assert.equal(h.fixture.stats().webhooks, 1, 'remote no-expiry subscription survives the crash');
+  const before = h.fixture.requests.filter(r => r.method === 'events/subscribe').length;
+  rpc = await h.start(sessionFile);
+  await until(() => h.fixture.requests.filter(r => r.method === 'events/subscribe').length > before, 'resumed webhook renewal');
+  const resumed = h.fixture.requests.filter(r => r.method === 'events/subscribe').at(-1).params;
+  assert.deepEqual(resumed.delivery, initial.delivery, 'callback URL and signing secret survive restart');
+  assert.equal(resumed.ttlMs, null);
+  assert.equal(h.fixture.stats().webhooks, 1, 'resuming does not create an orphan subscription');
+  assert.equal(h.fixture.stats().verifications, 1, 'server reuses the original subscription');
+  await h.emit(42); await h.received(42);
+  await h.shutdown();
+});
+
 test('unusable state directory gives one conversation warning and leaves events and ordinary tools working', {timeout: 45_000}, async t => {
   const h = await setup(t, {ephemeral: false, blocked: true}); const rpc = await h.start();
+  assert.ok(h.fixture.requests.filter(r => r.method === 'events/subscribe').every(r => r.params.ttlMs !== null), 'unavailable durable identity forces finite expiry');
   writeFileSync(h.release, 'continue');
   await until(async () => (await rpc.getMessages()).some(message => message.customType === 'mcp-events-status' && message.details?.code === 'PERSISTENCE_UNAVAILABLE'), 'conversation persistence warning');
   await h.emit(20); await h.received(20); await h.emit(21); await h.received(21);

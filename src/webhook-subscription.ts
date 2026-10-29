@@ -3,10 +3,12 @@ import {EventsClientError, EventsClientErrorCode as ErrorCode} from './errors.ts
 import {completeResult, EventMethod, EventProtocolError, normalizeTimestampOffset, subscribeResult, type EventOccurrence, type WebhookDeliveryStatus} from './protocol.ts';
 import {normalizeRequestError} from './request-error.ts';
 import {retryOperation} from './retry.ts';
+import type {WebhookIdentity} from './webhook-identities.ts';
 import type {WebhookReceiver} from './webhook.ts';
 import type {EventsWire} from './wire.ts';
 
 type SubscriptionOptions = {
+  webhookIdentity?: WebhookIdentity;
   name: string;
   arguments: Record<string, unknown>;
   maxAgeMs?: number;
@@ -37,6 +39,31 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
     tail = pending.catch(error => { stopped.abort(error); });
     return pending;
   };
+  type Grant = {cursor: string | null; truncated: boolean; deliveryStatus?: WebhookDeliveryStatus};
+  let pendingUpdate: {result?: Grant; gapCursor?: string; retrying: boolean} | undefined;
+  // Coalesce waiting updates without moving a grant watermark across a delivery.
+  const queueUpdate = (result?: Grant) => {
+    const gapCursor = result?.truncated && result.cursor !== null ? result.cursor : undefined;
+    if (pendingUpdate) {
+      if (result) pendingUpdate.result = result;
+      pendingUpdate.gapCursor = gapCursor ?? pendingUpdate.gapCursor;
+      pendingUpdate.retrying = result === undefined;
+      return;
+    }
+    const update = {result, gapCursor, retrying: result === undefined};
+    pendingUpdate = update;
+    void enqueue(async () => {
+      if (pendingUpdate === update) pendingUpdate = undefined;
+      const grant = update.result;
+      if (grant) {
+        const truncated = update.gapCursor !== undefined && update.gapCursor === grant.cursor;
+        if (update.gapCursor !== undefined && !truncated) await callbacks.gap(update.gapCursor);
+        await callbacks.active(grant.cursor, truncated, grant.deliveryStatus);
+        if (grant.deliveryStatus) await callbacks.deliveryStatus(grant.deliveryStatus);
+      }
+      if (update.retrying) await callbacks.retrying();
+    }).catch(() => {});
+  };
   signal.throwIfAborted();
   await receiver.start();
   signal.throwIfAborted();
@@ -46,13 +73,14 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
       stopped.abort(new EventsClientError(ErrorCode.SubscriptionTerminated, 'Webhook subscription terminated', {cause: new EventProtocolError(body.error)}));
       return;
     }
+    pendingUpdate = undefined;
     return enqueue(async () => {
       if ('type' in body) await callbacks.gap(body.cursor);
       else await callbacks.event(body);
     });
-  });
+  }, options.webhookIdentity);
   const retry = <T>(operation: () => Promise<T>) => retryOperation(operation, {
-    ...options, signal, onRetry: callbacks.retrying,
+    ...options, signal, onRetry: async () => { queueUpdate(); },
   });
   let attempted = false;
   let noExpiry = false;
@@ -80,10 +108,7 @@ export async function subscribeWebhook(wire: EventsWire, receiver: WebhookReceiv
       try { registration.bind(result.id); }
       catch (error) { throw new EventsClientError(ErrorCode.InvalidResponse, 'Server changed the webhook subscription ID', {cause: error}); }
       const renewAt = Date.now() + Math.min(remaining * 0.75, options.webhookRefreshMs);
-      await enqueue(async () => {
-        await callbacks.active(result.cursor, result.truncated, result.deliveryStatus);
-        if (result.deliveryStatus) await callbacks.deliveryStatus(result.deliveryStatus);
-      });
+      queueUpdate(result);
       await delay(Math.max(0, renewAt - Date.now()), {signal});
     }
     signal.throwIfAborted();

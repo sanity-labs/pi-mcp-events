@@ -1,6 +1,7 @@
 import {createHmac} from 'node:crypto';
 import {request} from 'node:http';
 import {afterEach, describe, expect, it, vi} from 'vitest';
+import {createWebhookIdentity} from '../src/webhook-identities.ts';
 import {EventsClientErrorCode as ErrorCode, WebhookReceiver, type WebhookOptions, type WebhookRegistration} from '../src/index.ts';
 
 const options = {publicUrl: 'https://events.example/hooks', port: 0};
@@ -58,6 +59,24 @@ describe('signed webhook receiver', () => {
     expect(response.status).toBe(200);
     expect(JSON.parse(response.body)).toEqual({challenge: 'one-time-nonce'});
     expect(accept).not.toHaveBeenCalled();
+  });
+
+  it('restores the generated route and signing secret and rejects simultaneous reuse', async () => {
+    const {receiver, post} = await setup();
+    const identity = createWebhookIdentity();
+    const first = receiver.register(() => {}, identity);
+    first.bind('sub_1');
+    expect((await post(first, event())).status).toBe(204);
+    expect(() => receiver.register(() => {}, identity)).toThrow(expect.objectContaining({code: ErrorCode.InvalidOptions}));
+    await first.close();
+    const accept = vi.fn();
+    const restored = receiver.register(accept, identity);
+    expect(restored.url).toBe(first.url); expect(restored.secret).toBe(first.secret);
+    restored.bind('sub_1');
+    expect((await post(first, event())).status).toBe(204);
+    expect(accept).toHaveBeenCalledOnce();
+    expect(() => receiver.register(() => {}, {...identity, routeId: '../unsafe'})).toThrow(expect.objectContaining({code: ErrorCode.InvalidOptions}));
+    expect(() => receiver.register(() => {}, {...identity, secret: 'whsec_weak'})).toThrow(expect.objectContaining({code: ErrorCode.InvalidOptions}));
   });
 
   it.each([event(), {type: 'gap', cursor: 'gap'}, {type: 'terminated', error: {code: -32024, message: 'ended'}}])('retries delivery racing the subscribe response, then forwards it after binding: %j', async body => {

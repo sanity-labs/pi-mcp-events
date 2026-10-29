@@ -37,10 +37,73 @@ describe('session persistence', () => {
     restored.setCursor('watch', null); expect(new SessionState(path).getCursor('watch')).toBeNull();
   });
 
+  it('restores independent private webhook identities without needing existing companion files', () => {
+    const path = file(); const state = seeded(path);
+    const identity = state.webhookIdentity('watch');
+    const other = state.webhookIdentity('other');
+    expect(identity.routeId).not.toBe(other.routeId); expect(identity.secret).not.toBe(other.secret);
+    identity.secret = 'mutated copy';
+    const restored = new SessionState(path);
+    expect(restored.webhookIdentity('watch')).toEqual(state.webhookIdentity('watch'));
+    expect(restored.webhookIdentity('other')).toEqual(other);
+    if (process.platform !== 'win32') expect(fs.statSync(`${path}.webhooks.json`).mode & 0o777).toBe(0o600);
+    restored.retainWebhookIdentities(['watch']);
+    expect(new SessionState(path).webhookIdentity('other')).not.toEqual(other);
+    expect(restored.getCursor('watch')).toBe('first');
+  });
+
+  it.each(['inbox', 'checkpoints'] as const)('restores callback identity even when the %s file cannot be restored', broken => {
+    const path = file(); const state = seeded(path);
+    const identity = state.webhookIdentity('watch');
+    fs.writeFileSync(broken === 'inbox' ? path : `${path}.cursors.json`, 'corrupt');
+    const restored = new SessionState(path);
+    expect(restored.mode).toBe('degraded');
+    expect(restored.webhookIdentity('watch')).toEqual(identity);
+    expect(restored.warning?.operation).toBe('read');
+  });
+
+  it.each(['malformed', 'duplicate', 'oversized'] as const)('preserves %s webhook identity state and degrades to memory', failure => {
+    const path = file(); const state = seeded(path); state.webhookIdentity('watch');
+    const stored = JSON.parse(fs.readFileSync(`${path}.webhooks.json`, 'utf8'));
+    if (failure === 'duplicate') stored.identities.push(stored.identities[0]);
+    if (failure === 'malformed') stored.identities[0][1].routeId = '../unsafe';
+    const text = failure === 'oversized' ? ' '.repeat(256 * 1024 + 1) : JSON.stringify(stored);
+    fs.writeFileSync(`${path}.webhooks.json`, text);
+    const restored = new SessionState(path);
+    expect(restored.mode).toBe('degraded');
+    expect(restored.getCursor('watch')).toBe('first'); expect(restored.snapshot()).toEqual([item('first')]);
+    const identity = restored.webhookIdentity('watch');
+    expect(restored.webhookIdentity('watch')).toEqual(identity);
+    expect(fs.readFileSync(`${path}.webhooks.json`, 'utf8')).toBe(text);
+  });
+
+  it.each(['before', 'after'] as const)('retains webhook identity in memory when writing fails %s replacement', failure => {
+    if (failure === 'after' && process.platform === 'win32') return;
+    const path = file(); const state = seeded(path);
+    if (failure === 'before') vi.spyOn(fs, 'renameSync').mockImplementation(denied);
+    else {
+      const sync = fs.fsyncSync;
+      vi.spyOn(fs, 'fsyncSync').mockImplementation(fd => { if (fs.fstatSync(fd).isDirectory()) denied(); sync(fd); });
+    }
+    const identity = state.webhookIdentity('watch');
+    expect(state.mode).toBe('degraded'); expect(state.webhookIdentity('watch')).toEqual(identity);
+    expect(state.getCursor('watch')).toBe('first');
+    if (failure === 'after') expect(new SessionState(path).webhookIdentity('watch')).toEqual(identity);
+    else expect(fs.existsSync(`${path}.webhooks.json`)).toBe(false);
+  });
+
+  it('bounds stored webhook identities and keeps memory identities stable', () => {
+    const state = new SessionState(undefined, {checkpoints: {maxEntries: 1}});
+    const identity = state.webhookIdentity('watch');
+    expect(state.webhookIdentity('watch')).toEqual(identity);
+    expect(() => state.webhookIdentity('other')).toThrow(expect.objectContaining({code: ErrorCode.LimitExceeded}));
+    expect(() => state.webhookIdentity('')).toThrow(expect.objectContaining({code: ErrorCode.InvalidOptions}));
+  });
+
   it('does no filesystem work or warnings when persistence is not requested', () => {
     const open = vi.spyOn(fs, 'openSync'); const mkdir = vi.spyOn(fs, 'mkdirSync'); const onWarning = vi.fn();
     const state = new SessionState(undefined, {onWarning});
-    state.accept(item('first')); state.setCursor('watch', 'first'); state.acknowledge(1); state.retainCursors([]);
+    state.accept(item('first')); state.setCursor('watch', 'first'); state.acknowledge(1); state.retainCursors([]); state.webhookIdentity('watch'); state.retainWebhookIdentities([]);
     expect(state.mode).toBe('memory'); expect(state.warning).toBeUndefined();
     expect(new SessionState().size).toBe(0); expect(new SessionState().getCursor('watch')).toBeNull();
     expect(open).not.toHaveBeenCalled(); expect(mkdir).not.toHaveBeenCalled(); expect(onWarning).not.toHaveBeenCalled();
