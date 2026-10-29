@@ -18,7 +18,7 @@ type SessionWatch = Pick<WatchOptions, 'name' | 'mode'> & {
   failure?: 'connection failed' | 'could not start' | 'failed';
 };
 type ActiveSession = {
-  closed: boolean; clients: Map<string, {client: EventsClient; ready: Promise<void>}>; watches: Map<string, SessionWatch>;
+  closed: boolean; clients: Map<string, {client: EventsClient; ready: Promise<void>; catalogFailed?: boolean}>; watches: Map<string, SessionWatch>;
   stopping?: Promise<void>;
   state?: SessionState; delivery?: ConversationDelivery; receiver?: WebhookReceiver; path?: string;
 };
@@ -81,7 +81,14 @@ export default function mcpEvents(pi: ExtensionAPI) {
         if (existing) return existing;
         session.receiver ??= createReceiver(config, configPath);
         const client = new EventsClient(new EventsWire(() => createTransport(config.servers[server]!, dirname(configPath))), {...config.client, webhookReceiver: session.receiver});
-        const ready = client.connect().catch(async error => {
+        const ready = client.connect().then(() => {
+          void client.catalogUpdates?.closed.catch(() => {
+            const connection = session.clients.get(server);
+            if (session.closed || connection?.client !== client) return;
+            connection.catalogFailed = true;
+            report(`MCP Events catalog updates stopped for ${server}. Watch definitions may be outdated. Use /reload to reconnect.`);
+          });
+        }).catch(async error => {
           if (session.clients.get(server)?.client === client) session.clients.delete(server);
           await client.close().catch(() => {});
           if (!session.closed) report(`MCP Events could not connect to ${server}. Check its configuration, credentials, and protocol support.`);
@@ -182,9 +189,11 @@ export default function mcpEvents(pi: ExtensionAPI) {
       const running = [...session?.watches.values() ?? []].filter(entry => entry.starting || (entry.watch && entry.watch.status !== 'stopped')).length;
       const watches = [...session?.watches ?? []].map(([id, entry]) =>
         `${id}: ${entry.starting ? 'starting' : entry.failure ?? entry.watch?.status ?? 'stopped'} — ${entry.server} / ${entry.name} (${entry.mode})`);
+      const catalogWarnings = [...session?.clients ?? []].filter(([, connection]) => connection.catalogFailed)
+        .map(([server]) => `Catalog updates stopped for ${server}. Watch definitions may be outdated. Use /reload to reconnect.`);
       report(session?.state
         ? [`MCP Events: ${session.state.mode}; ${running} running watch(es); ${session.state.size} pending observation(s).`,
-          `Event state: ${session.path ?? 'memory only'}`, ...watches, session.state.warning?.message].filter(Boolean).join('\n')
+          `Event state: ${session.path ?? 'memory only'}`, ...watches, ...catalogWarnings, session.state.warning?.message].filter(Boolean).join('\n')
         : 'MCP Events has no active session.');
     },
   });

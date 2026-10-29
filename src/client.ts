@@ -1,3 +1,4 @@
+import {addAbortListener} from 'node:events';
 import {ProtocolError, type StandardSchemaV1} from '@modelcontextprotocol/client';
 import delay from 'delay';
 import {z} from 'zod';
@@ -113,6 +114,18 @@ export class EventsClient {
     this.refreshing = this.readCatalog().finally(() => { this.refreshing = undefined; });
     return this.refreshing;
   }
+  private async refreshAfterCurrent(signal: AbortSignal) {
+    signal.throwIfAborted();
+    const aborted = Promise.withResolvers<never>();
+    const listener = addAbortListener(signal, () => aborted.reject(signal.reason));
+    const refresh = async () => {
+      await this.refreshing?.catch(() => {});
+      signal.throwIfAborted();
+      return this.refresh();
+    };
+    try { return await Promise.race([refresh(), aborted.promise]); }
+    finally { listener[Symbol.dispose](); }
+  }
   private async request<S extends StandardSchemaV1>(method: string, params: Record<string, unknown>, schema: S, signal: AbortSignal) {
     this.assertOpen();
     try { return await this.wire.request(method, params, schema, {signal}); }
@@ -190,11 +203,20 @@ export class EventsClient {
       });
       cursor = next;
     };
-    const emit = async (event: EventOccurrence) => {
+    const validateEvent = (event: EventOccurrence) => {
       try { this.contract(options).event(event); }
       catch (error) {
         if (error instanceof EventsClientError) throw error;
         throw new EventsClientError(ErrorCode.InvalidEvent, 'Event does not match its advertised name or payloadSchema', {cause: error});
+      }
+    };
+    const emit = async (event: EventOccurrence) => {
+      try { validateEvent(event); }
+      catch (error) {
+        if (event.name !== options.name || !(error instanceof EventsClientError) || error.code !== ErrorCode.InvalidEvent) throw error;
+        await retry(() => this.refreshAfterCurrent(signal));
+        signal.throwIfAborted();
+        validateEvent(event);
       }
       if (seen.has(event.eventId)) return;
       await deliver({type: 'event', event});

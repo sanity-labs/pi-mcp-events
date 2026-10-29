@@ -22,7 +22,7 @@ const schema = {
 };
 
 // Synthetic test server only. It accepts callbacks solely through its own loopback TLS proxy.
-export async function startFixture(tls) {
+export async function startFixture(tls, {catalogUpdates = false} = {}) {
   const reservation = createTcpServer();
   const callbackPort = await listen(reservation);
   await close(reservation);
@@ -38,6 +38,7 @@ export async function startFixture(tls) {
   const callbackOrigin = `https://127.0.0.1:${proxyPort}`;
   const token = randomBytes(32).toString('hex');
   const streams = new Set();
+  const catalogs = new Set();
   const webhooks = new Map();
   const history = createEventLog();
   const requests = [];
@@ -107,8 +108,18 @@ export async function startFixture(tls) {
     const channel = params.arguments?.channel;
     switch (body.method) {
       case 'server/discover':
-        reply({supportedVersions: ['2026-07-28'], capabilities: {extensions: {'io.modelcontextprotocol/events': {}}}});
+        reply({supportedVersions: ['2026-07-28'], capabilities: {extensions: {'io.modelcontextprotocol/events': {listChanged: catalogUpdates}}}});
         return;
+      case 'subscriptions/listen': {
+        response.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-cache'});
+        const stream = {id: body.id, response};
+        catalogs.add(stream);
+        response.write(`data: ${JSON.stringify({jsonrpc: '2.0', method: 'notifications/subscriptions/acknowledged', params: {
+          notifications: {eventsListChanged: true}, _meta: {'io.modelcontextprotocol/subscriptionId': body.id},
+        }})}\n\n`);
+        response.on('close', () => catalogs.delete(stream));
+        return;
+      }
       case 'events/list':
         reply({events: [{name: 'example.changed', delivery: ['poll', 'push'], ...schema}, {name: 'example.live_changed', delivery: ['webhook'], ...schema}]});
         return;
@@ -160,6 +171,11 @@ export async function startFixture(tls) {
     return {
       connection: {baseUrl, url: `${baseUrl}/mcp`, token, callbackOrigin, callbackPort, callbackTls: false, webhookEventName: 'example.live_changed', webhookReplay: false},
       requests,
+      failCatalogUpdates() {
+        for (const stream of catalogs) stream.response.end(`data: ${JSON.stringify({jsonrpc: '2.0', id: stream.id,
+          error: {code: -32024, message: 'Catalog access revoked: private-test-detail'},
+        })}\n\n`);
+      },
       disconnect() { for (const stream of streams) stream.response.end(); },
       terminateStreams() {
         for (const stream of streams) {
@@ -167,8 +183,8 @@ export async function startFixture(tls) {
           stream.response.end();
         }
       },
-      stats: () => ({streams: streams.size, webhooks: webhooks.size, verifications, deliveries}),
-      async close() {for (const stream of streams) stream.response.end(); await close(server); await close(proxy);},
+      stats: () => ({streams: streams.size, webhooks: webhooks.size, catalogs: catalogs.size, verifications, deliveries}),
+      async close() {for (const stream of [...streams, ...catalogs]) stream.response.end(); await close(server); await close(proxy);},
     };
   } catch (error) {await close(proxy); throw error;}
 }
