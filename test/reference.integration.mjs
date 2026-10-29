@@ -31,6 +31,39 @@ async function setup(t, options) {
 }
 
 for (const mode of ['poll', 'push']) {
+  test(`weather reference: ${mode} delivers alongside an unsupported event schema`, {timeout: 20_000}, async t => {
+    const server = await startWeatherServer({port: 0, intervalMs: 0});
+    const wire = new EventsWire(() => createHttpTransport(new URL(server.url), {fetch: async (url, init) => {
+      const response = await fetch(url, init);
+      if (JSON.parse(init.body).method !== 'events/list') return response;
+      const body = await response.json();
+      const reading = body.result.events.find(event => event.name === 'weather.reading');
+      reading.inputSchema = true;
+      reading.payloadSchema = true;
+      body.result.events.push({name: 'weather.experimental', delivery: ['poll', 'push'], inputSchema: true,
+        payloadSchema: {$schema: 'https://example.com/unsupported-schema'}});
+      return Response.json(body);
+    }}));
+    const client = new EventsClient(wire, {retryMs: 10});
+    t.after(async () => { await client.close(); await server.close(); });
+    await client.connect();
+    assert.equal(client.list().length, 4);
+    assert.deepEqual(client.catalogIssues.map(issue => issue.name), ['weather.experimental']);
+    assert.throws(() => client.watch({name: 'weather.experimental', arguments: {}, mode}, () => {}), {code: 'UNSUPPORTED_EVENT_SCHEMA'});
+    const events = [];
+    const watch = client.watch({name: 'weather.reading', arguments: {}, mode}, item => {
+      if (item.type === 'event') events.push(item.event);
+    });
+    await watch.ready;
+    await client.refresh();
+    const [reading] = server.advance();
+    await until(() => events.length === 1);
+    assert.equal(events[0].eventId, reading.eventId);
+    assert.deepEqual(events[0].data, reading.data);
+    assert.equal(watch.status, 'active');
+    await watch.stop();
+  });
+
   test(`weather reference: ${mode} recovers a reading rejected by a stale catalog`, {timeout: 20_000}, async t => {
     const server = await startWeatherServer({port: 0, intervalMs: 0});
     let catalogReads = 0;

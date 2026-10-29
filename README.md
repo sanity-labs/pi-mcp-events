@@ -155,6 +155,8 @@ Each watch needs
 
 `arguments` defaults to `{}` and must satisfy the server's input schema. An event, its arguments, and a mode combine to form a unique configuration: duplicate watches can't be configured on one server.
 
+Schemas can be JSON Schema objects or booleans. If this client cannot use an event's schemas, that event is unavailable; other events remain usable. `/mcp-events status` lists unavailable event types. After the server repairs a schema, use `/mcp-events start <watchId>` to retry the affected watch.
+
 HTTP servers support headers supplied directly or through `{ "env": "VARIABLE", "prefix": "optional prefix" }`. For a local MCP process, a server entry looks like this:
 
 ```json

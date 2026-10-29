@@ -38,7 +38,7 @@ function files(path) {
     return [full.slice(path.length), readFileSync(full, 'utf8')];
   }));
 }
-async function setup(t, {ephemeral = true, override = true, blocked = false, catalogUpdates = false, configure = config => config} = {}) {
+async function setup(t, {ephemeral = true, override = true, blocked = false, catalogUpdates = false, extraEvents = [], configure = config => config} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-events-cli-'));
   const agentDir = join(directory, 'agent'); mkdirSync(agentDir);
   execFileSync(process.execPath, [cliPath, 'install', root], {
@@ -46,7 +46,7 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, cat
   });
   const key = join(directory, 'key.pem'); const cert = join(directory, 'cert.pem');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'], {stdio: 'ignore'});
-  const fixture = await startFixture({key: readFileSync(key), cert: readFileSync(cert)}, {catalogUpdates});
+  const fixture = await startFixture({key: readFileSync(key), cert: readFileSync(cert)}, {catalogUpdates, extraEvents});
   const stateDir = override ? join(directory, 'custom-state') : join(agentDir, 'mcp-events');
   if (blocked) writeFileSync(stateDir, 'not a directory');
   else { mkdirSync(stateDir); if (ephemeral) writeFileSync(join(stateDir, 'saved-state.json'), 'preserve existing saved-session state'); }
@@ -106,6 +106,38 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, cat
   };
   return {directory, agentDir, stateDir, fixture, start, emit, received, accepted, hold, shutdown, contexts, release};
 }
+
+test('unsupported event schemas leave other watches working and can be retried after repair', {timeout: 45_000}, async t => {
+  const unavailable = {name: 'example.experimental', delivery: ['poll'], inputSchema: true,
+    payloadSchema: {$schema: 'https://private-test-schema.invalid/secret'}};
+  const h = await setup(t, {catalogUpdates: true, extraEvents: [unavailable], configure: config => ({...config, watches: [...config.watches,
+    {id: 'experimental', server: 'local', name: unavailable.name, mode: 'poll', arguments: {channel: 'experimental'}},
+  ]})});
+  const rpc = await h.start();
+  const status = await watchStatus(rpc);
+  assert.ok(status.includes('experimental: unsupported schema'));
+  assert.ok(status.includes('Unavailable event: local / example.experimental'));
+  assert.ok(status.includes('3 running watch(es)'));
+  const messages = JSON.stringify(await rpc.getMessages());
+  assert.ok(messages.includes('event schemas are unsupported or invalid'));
+  assert.ok(!messages.includes('private-test-schema'));
+  assert.ok(!existsSync(h.contexts), 'schema diagnostic does not start a model turn');
+  await h.emit(700); await h.received(700);
+  h.fixture.setExtraEvents([{...unavailable, payloadSchema: true}]);
+  await rpc.prompt('/mcp-events start experimental');
+  await until(async () => (await watchStatus(rpc)).includes('experimental: active'), 'repaired schema permits the watch to start');
+  const repaired = await watchStatus(rpc);
+  assert.ok(!repaired.includes('Unavailable event:'));
+  assert.ok(repaired.includes('4 running watch(es)'));
+  await h.emit(701); await h.received(701);
+  h.fixture.setExtraEvents([unavailable]);
+  await until(async () => (await watchStatus(rpc)).includes('experimental: unsupported schema'), 'only the affected watch stops after a schema change');
+  const stopped = await watchStatus(rpc);
+  assert.ok(stopped.includes('3 running watch(es)'));
+  assert.equal(h.fixture.stats().catalogs, 1, 'catalog monitoring survives the unsupported schema');
+  assert.ok(JSON.stringify(await rpc.getMessages()).includes('stopped because its event schemas are unsupported or invalid'));
+  await h.emit(702); await h.received(702);
+});
 
 test('catalog monitoring failures warn without a model turn and keep watches working', {timeout: 45_000}, async t => {
   const h = await setup(t, {catalogUpdates: true});

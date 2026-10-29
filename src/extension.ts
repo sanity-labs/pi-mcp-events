@@ -5,6 +5,7 @@ import {getAgentDir, type ExtensionAPI, type ExtensionContext} from '@earendil-w
 import {EventsClient, type Watch, type WatchOptions} from './client.ts';
 import {createReceiver, createTransport, readConfig} from './config.ts';
 import {ConversationDelivery} from './conversation.ts';
+import {EventsClientError, EventsClientErrorCode} from './errors.ts';
 import {MESSAGE_TYPE, OBSERVATION_EVENT, STATUS_MESSAGE_TYPE} from './pi-contract.ts';
 import {renderEventMessage} from './message-renderer.ts';
 import {canonical} from './protocol.ts';
@@ -15,7 +16,7 @@ import {EventsWire} from './wire.ts';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 type SessionWatch = Pick<WatchOptions, 'name' | 'mode'> & {
   server: string; watch?: Watch; start?: () => Promise<void>; starting?: Promise<void>;
-  failure?: 'connection failed' | 'could not start' | 'failed';
+  failure?: 'connection failed' | 'could not start' | 'unsupported schema' | 'failed';
 };
 type ActiveSession = {
   closed: boolean; clients: Map<string, {client: EventsClient; ready: Promise<void>; catalogFailed?: boolean}>; watches: Map<string, SessionWatch>;
@@ -129,13 +130,23 @@ export default function mcpEvents(pi: ExtensionAPI) {
               state.setCursor(key, cursor);
             });
             entry.watch = watch;
-            void watch.closed.catch(() => {
+            void watch.closed.catch(error => {
               if (session.closed || entry.watch !== watch) return;
+              if (error instanceof EventsClientError && error.code === EventsClientErrorCode.UnsupportedEventSchema) {
+                entry.failure = 'unsupported schema';
+                report(`MCP Events watch "${configured.id}" stopped because its event schemas are unsupported or invalid. Check the server's event schemas.`);
+                return;
+              }
               entry.failure = 'failed';
               report(`MCP Events watch "${configured.id}" stopped. Check its configuration and server access.`);
             });
-          } catch {
+          } catch (error) {
             entry.failure = 'could not start';
+            if (error instanceof EventsClientError && error.code === EventsClientErrorCode.UnsupportedEventSchema) {
+              entry.failure = 'unsupported schema';
+              report(`MCP Events could not start watch "${configured.id}" because its event schemas are unsupported or invalid. Check the server's event schemas.`);
+              return;
+            }
             report(`MCP Events could not start watch "${configured.id}". Check its event name, arguments, and delivery mode.`);
           }
         };
@@ -191,9 +202,11 @@ export default function mcpEvents(pi: ExtensionAPI) {
         `${id}: ${entry.starting ? 'starting' : entry.failure ?? entry.watch?.status ?? 'stopped'} — ${entry.server} / ${entry.name} (${entry.mode})`);
       const catalogWarnings = [...session?.clients ?? []].filter(([, connection]) => connection.catalogFailed)
         .map(([server]) => `Catalog updates stopped for ${server}. Watch definitions may be outdated. Use /reload to reconnect.`);
+      const schemaWarnings = [...session?.clients ?? []].flatMap(([server, {client}]) => client.catalogIssues
+        .map(({name}) => `Unavailable event: ${server} / ${name} (unsupported or invalid schema).`));
       report(session?.state
         ? [`MCP Events: ${session.state.mode}; ${running} running watch(es); ${session.state.size} pending observation(s).`,
-          `Event state: ${session.path ?? 'memory only'}`, ...watches, ...catalogWarnings, session.state.warning?.message].filter(Boolean).join('\n')
+          `Event state: ${session.path ?? 'memory only'}`, ...watches, ...catalogWarnings, ...schemaWarnings, session.state.warning?.message].filter(Boolean).join('\n')
         : 'MCP Events has no active session.');
     },
   });

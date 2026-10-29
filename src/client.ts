@@ -57,6 +57,7 @@ export type ClientOptions = {
   maxTrackedEventIds?: number;
 };
 const clientSchema = clientSettingsSchema.extend({webhookReceiver: z.instanceof(WebhookReceiver).optional()});
+type CatalogEntry = EventContract | {descriptor: EventDescriptor; error: EventsClientError};
 
 function needsRediscovery(error: unknown): boolean {
   if (!(error instanceof EventProtocolError)) return false;
@@ -71,12 +72,16 @@ export class EventsClient {
   private readonly settings: z.output<typeof clientSchema>;
   private readonly lifetime = new AbortController();
   private readonly watches = new Map<string, Watch>();
-  private contracts = new Map<string, EventContract>();
+  private catalogEntries = new Map<string, CatalogEntry>();
   private refreshing?: Promise<EventDescriptor[]>;
   private catalog?: Readonly<Pick<Watch, 'ready' | 'closed'>>;
   private catalogRunning = false;
 
   get catalogUpdates() { return this.catalog; }
+  get catalogIssues() {
+    return [...this.catalogEntries.values()].flatMap(entry => 'error' in entry
+      ? [{name: entry.descriptor.name, error: entry.error}] : []);
+  }
 
   constructor(wire: EventsWire, settings: ClientOptions = {}) {
     this.wire = wire;
@@ -108,7 +113,7 @@ export class EventsClient {
       void this.catalog.closed.finally(() => { this.catalogRunning = false; }).catch(() => {});
     }
   }
-  list() { return [...this.contracts.values()].map(contract => contract.descriptor); }
+  list() { return [...this.catalogEntries.values()].map(entry => entry.descriptor); }
   refresh(): Promise<EventDescriptor[]> {
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.readCatalog().finally(() => { this.refreshing = undefined; });
@@ -132,7 +137,7 @@ export class EventsClient {
     catch (error) { signal.throwIfAborted(); throw normalizeRequestError(error); }
   }
   private async readCatalog() {
-    const contracts = new Map<string, EventContract>();
+    const entries = new Map<string, CatalogEntry>();
     const cursors = new Set<string>();
     let cursor: string | undefined;
     let pages = 0;
@@ -140,24 +145,29 @@ export class EventsClient {
       if (pages++ >= this.settings.maxCatalogPages) throw limitExceeded('maxCatalogPages', this.settings.maxCatalogPages);
       const result = await this.request(EventMethod.List, cursor === undefined ? {} : {cursor}, catalogResult, this.lifetime.signal);
       for (const descriptor of result.events) {
-        if (contracts.has(descriptor.name)) throw new EventsClientError(ErrorCode.InvalidCatalog, 'Duplicate event name in catalog', {details: {name: descriptor.name}});
-        if (contracts.size >= this.settings.maxCatalogEntries) throw limitExceeded('maxCatalogEntries', this.settings.maxCatalogEntries);
-        try { contracts.set(descriptor.name, new EventContract(descriptor)); }
-        catch (error) { throw new EventsClientError(ErrorCode.InvalidCatalog, 'Invalid event schema in catalog', {cause: error, details: {name: descriptor.name}}); }
+        if (entries.has(descriptor.name)) throw new EventsClientError(ErrorCode.InvalidCatalog, 'Duplicate event name in catalog', {details: {name: descriptor.name}});
+        if (entries.size >= this.settings.maxCatalogEntries) throw limitExceeded('maxCatalogEntries', this.settings.maxCatalogEntries);
+        try { entries.set(descriptor.name, new EventContract(descriptor)); }
+        catch (error) {
+          entries.set(descriptor.name, {descriptor, error: new EventsClientError(
+            ErrorCode.UnsupportedEventSchema, 'Event schemas are unsupported or invalid', {cause: error, details: {name: descriptor.name}},
+          )});
+        }
       }
       cursor = result.nextCursor;
       if (cursor !== undefined && cursors.has(cursor)) throw new EventsClientError(ErrorCode.InvalidCatalog, 'Event catalog pagination repeated a cursor');
       if (cursor !== undefined) cursors.add(cursor);
     } while (cursor !== undefined);
-    this.contracts = contracts;
+    this.catalogEntries = entries;
     return this.list();
   }
   private assertOpen() {
     if (this.lifetime.signal.aborted) throw new EventsClientError(ErrorCode.Closed, 'MCP Events client is closed');
   }
   private contract(options: WatchOptions) {
-    const contract = this.contracts.get(options.name);
+    const contract = this.catalogEntries.get(options.name);
     if (!contract) throw new EventsClientError(ErrorCode.EventNotFound, 'Event is not in the current catalog', {details: {name: options.name}});
+    if ('error' in contract) throw contract.error;
     if (!contract.descriptor.delivery.includes(options.mode)) throw new EventsClientError(ErrorCode.UnsupportedDeliveryMode, 'Event does not offer this delivery mode', {details: {name: options.name, mode: options.mode}});
     try { contract.arguments(options.arguments); }
     catch (error) { throw new EventsClientError(ErrorCode.InvalidArguments, 'Subscription arguments do not match inputSchema', {cause: error}); }
