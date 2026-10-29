@@ -283,9 +283,16 @@ export class EventsClient {
       }
     };
     const push = async () => {
+      const terminationReason = (error: unknown) => error instanceof EventsClientError && error.code === ErrorCode.SubscriptionTerminated
+        ? error.cause : error;
       let rediscovered = false;
+      let rediscoveryPending = false;
       while (!signal.aborted) {
         await retryOperation(async () => {
+          if (rediscoveryPending) {
+            await rediscover();
+            rediscoveryPending = false;
+          }
           this.contract(options);
           let firstProgressAt: number | undefined;
           let healthy = false;
@@ -293,7 +300,7 @@ export class EventsClient {
             const now = performance.now();
             firstProgressAt ??= now;
             healthy = now - firstProgressAt >= this.settings.heartbeatMs * 2;
-            rediscovered = false;
+            if (healthy) rediscovered = false;
             currentStatus = 'active';
           };
           try {
@@ -316,18 +323,23 @@ export class EventsClient {
             });
           } catch (error) {
             signal.throwIfAborted();
-            const reason = error instanceof EventsClientError && error.code === ErrorCode.SubscriptionTerminated
-              ? error.cause : error;
-            if (needsRediscovery(reason) && !rediscovered) {
-              rediscovered = true;
-              await rediscover();
-              return;
+            if (needsRediscovery(terminationReason(error))) {
+              if (!rediscovered) {
+                rediscovered = true;
+                await rediscover();
+                return;
+              }
+              rediscoveryPending = true;
+              throw error;
             }
             const normalized = normalizeRequestError(error);
             if (healthy && retryable(normalized) && this.settings.maxRetries > 0) return;
             throw normalized;
           }
-        }, {...this.settings, signal, randomize: true, onRetry: () => status('retrying')});
+        }, {
+          ...this.settings, signal, randomize: true, onRetry: () => status('retrying'),
+          shouldRetry: error => retryable(error) || needsRediscovery(terminationReason(error)),
+        });
         await status('retrying');
       }
     };
