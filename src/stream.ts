@@ -40,8 +40,8 @@ export async function streamEvents(
         if (method === EventNotification.Active) {
           const message = activeNotification.parse(value);
           await handlers.active(message.cursor, message.truncated);
+          if (!active) lastSeen = Date.now();
           active = true;
-          lastSeen = Date.now();
           return;
         }
         if (!active) throw new EventsClientError(ErrorCode.InvalidResponse, 'Event stream did not begin with active');
