@@ -39,6 +39,12 @@ export const cursor = z.string().nullable().optional().transform(value => value 
 export const deliveryMode = z.enum(['poll', 'push', 'webhook']);
 export type DeliveryMode = z.infer<typeof deliveryMode>;
 const jsonSchema = z.union([z.boolean(), record]);
+const extendedTimestamp = z.iso.datetime({offset: true});
+const timestamp = z.string().refine(value => extendedTimestamp.safeParse(normalizeTimestampOffset(value)).success, 'Invalid ISO 8601 timestamp');
+
+export function normalizeTimestampOffset(value: string): string {
+  return value.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+}
 
 export const descriptor = z.object({
   name: z.string().min(1),
@@ -52,7 +58,7 @@ export type EventDescriptor = z.infer<typeof descriptor>;
 export const occurrence = z.object({
   eventId: z.string(),
   name: z.string(),
-  timestamp: z.iso.datetime({offset: true}),
+  timestamp,
   data: record,
   cursor,
   _meta: record.optional(),
@@ -66,12 +72,12 @@ export const pollResult = completeResult.extend({
   hasMore: z.boolean(), nextPollMs: z.number().int().nonnegative(),
 });
 export const subscribeResult = completeResult.extend({
-  id: z.string().min(1), refreshBefore: z.iso.datetime({offset: true}).nullable(),
+  id: z.string().min(1), refreshBefore: timestamp.nullable(),
   cursor, truncated: z.boolean(),
   deliveryStatus: z.object({
-    active: z.boolean(), lastDeliveryAt: z.iso.datetime({offset: true}).nullable().optional(),
+    active: z.boolean(), lastDeliveryAt: timestamp.nullable().optional(),
     lastError: z.enum(['connection_refused', 'timeout', 'tls_error', 'http_4xx', 'http_5xx', 'challenge_failed']).nullable().optional(),
-    failedSince: z.iso.datetime({offset: true}).nullable().optional(),
+    failedSince: timestamp.nullable().optional(),
     throttled: z.boolean().optional(), retryAfterMs: z.number().int().nonnegative().optional(),
   }).optional(),
 });

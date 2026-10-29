@@ -80,6 +80,18 @@ describe('signed webhook receiver', () => {
     expect(accept).toHaveBeenCalledWith(event());
   });
 
+  it('preserves a basic-offset timestamp after verifying the original signed bytes', async () => {
+    const {receiver, post} = await setup();
+    const accept = vi.fn();
+    const route = receiver.register(accept); route.bind('sub_1');
+    const body = {...event(), timestamp: '2026-10-25T17:30:00+0530'};
+    expect((await post(route, body, {raw: Buffer.from(JSON.stringify(body, null, 2))})).status).toBe(204);
+    expect(accept).toHaveBeenCalledWith(body);
+    const invalid = {...body, timestamp: '2026-10-25T17:30:00+0560'};
+    expect((await post(route, invalid, {id: 'invalid'})).status).toBe(400);
+    expect(accept).toHaveBeenCalledOnce();
+  });
+
   it('accepts a valid rotation signature among other signature versions', async () => {
     const {receiver, post} = await setup();
     const accept = vi.fn();

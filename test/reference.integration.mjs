@@ -31,6 +31,26 @@ async function setup(t, options) {
 }
 
 for (const mode of ['poll', 'push']) {
+  test(`weather reference: ${mode} preserves basic-offset event timestamps`, {timeout: 20_000}, async t => {
+    const {server, client} = await setup(t, {
+      onEvent(event) { event.timestamp = event.timestamp.replace(/Z$/, '+0000'); },
+    });
+    const events = [];
+    const watch = client.watch({name: 'weather.reading', arguments: {}, mode}, item => {
+      if (item.type === 'event') events.push(item.event);
+    });
+    await watch.ready;
+    const [reading] = server.advance();
+    await until(() => events.length === 1);
+    assert.match(reading.timestamp, /\+0000$/);
+    assert.equal(events[0].timestamp, reading.timestamp);
+    assert.equal(events[0].eventId, reading.eventId);
+    assert.deepEqual(events[0].data, reading.data);
+    assert.ok(watch.cursor);
+    assert.equal(watch.status, 'active');
+    await watch.stop();
+  });
+
   test(`weather reference: ${mode} delivers alongside an unsupported event schema`, {timeout: 20_000}, async t => {
     const server = await startWeatherServer({port: 0, intervalMs: 0});
     const wire = new EventsWire(() => createHttpTransport(new URL(server.url), {fetch: async (url, init) => {

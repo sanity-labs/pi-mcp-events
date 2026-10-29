@@ -132,6 +132,24 @@ describe('webhook watches', () => {
     expect(statuses).toContainEqual({type: 'status', status: 'webhook-delivery', deliveryStatus: {active: false, lastError: 'timeout', throttled: true, retryAfterMs: 100}});
   });
 
+  it.each([330, -270])('renews grants with a basic numeric offset of %i minutes and preserves status timestamps', async offsetMinutes => {
+    const s = await setup();
+    const offset = offsetMinutes > 0 ? '+0530' : '-0430';
+    const withOffset = (time: number) => new Date(time + offsetMinutes * 60_000).toISOString().replace(/Z$/, offset);
+    const deliveryStatus = {active: true, lastDeliveryAt: withOffset(Date.now() - 1000), failedSince: withOffset(Date.now() - 2000)};
+    s.subscribe(req => s.grant(req, {
+      refreshBefore: withOffset(Date.now() + (s.subscriptions.length === 1 ? 400 : 60_000)),
+      deliveryStatus,
+    }));
+    const observations: Observation[] = [];
+    const watch = s.client.watch(options, item => { observations.push(item); });
+    await watch.ready;
+    await vi.waitFor(() => expect(observations).toContainEqual({type: 'status', status: 'webhook-delivery', deliveryStatus}));
+    await vi.waitFor(() => expect(s.subscriptions).toHaveLength(2), {timeout: 2000});
+    expect(watch.status).toBe('active');
+    await watch.stop();
+  });
+
   it.each([undefined, 1000])('rejects unsolicited no-expiry grants for ttlMs=%s', async ttlMs => {
     const s = await setup();
     s.subscribe(req => s.grant(req, {refreshBefore: null}));
