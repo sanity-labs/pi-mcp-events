@@ -31,6 +31,17 @@ function setup(settings: ClientOptions = {}) {
 }
 
 describe('event discovery', () => {
+  it('preserves event descriptor metadata through listing and refreshes', async () => {
+    const {client, transport} = setup();
+    const metadata = {'example.com/hints': {category: 'changes', tags: ['live']}};
+    transport.handle = request => transport.respond(request, {events: [{...descriptor, _meta: metadata}]});
+    await client.connect();
+    expect(client.list()[0]?._meta).toEqual(metadata);
+    const updated = {...metadata, 'example.com/revision': 2};
+    transport.handle = request => transport.respond(request, {events: [{...descriptor, _meta: updated}]});
+    expect((await client.refresh())[0]?._meta).toEqual(updated);
+    expect(client.list()[0]?._meta).toEqual(updated);
+  });
   it('reports starting, retrying, quiet recovery, and stopped through the watch', async () => {
     const {client, transport, polls} = setup();
     await client.connect();

@@ -45,6 +45,7 @@ export const descriptor = z.object({
   delivery: z.array(deliveryMode).min(1),
   inputSchema: record,
   payloadSchema: record,
+  _meta: record.optional(),
 });
 export type EventDescriptor = z.infer<typeof descriptor>;
 export const occurrence = z.object({

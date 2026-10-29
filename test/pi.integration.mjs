@@ -38,7 +38,7 @@ function files(path) {
     return [full.slice(path.length), readFileSync(full, 'utf8')];
   }));
 }
-async function setup(t, {ephemeral = true, override = true, blocked = false, configure = config => config} = {}) {
+async function setup(t, {ephemeral = true, override = true, blocked = false, catalogUpdates = false, configure = config => config} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-events-cli-'));
   const agentDir = join(directory, 'agent'); mkdirSync(agentDir);
   execFileSync(process.execPath, [cliPath, 'install', root], {
@@ -46,7 +46,7 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, con
   });
   const key = join(directory, 'key.pem'); const cert = join(directory, 'cert.pem');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'], {stdio: 'ignore'});
-  const fixture = await startFixture({key: readFileSync(key), cert: readFileSync(cert)});
+  const fixture = await startFixture({key: readFileSync(key), cert: readFileSync(cert)}, {catalogUpdates});
   const stateDir = override ? join(directory, 'custom-state') : join(agentDir, 'mcp-events');
   if (blocked) writeFileSync(stateDir, 'not a directory');
   else { mkdirSync(stateDir); if (ephemeral) writeFileSync(join(stateDir, 'saved-state.json'), 'preserve existing saved-session state'); }
@@ -106,6 +106,26 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, con
   };
   return {directory, agentDir, stateDir, fixture, start, emit, received, accepted, hold, shutdown, contexts, release};
 }
+
+test('catalog monitoring failures warn without a model turn and keep watches working', {timeout: 45_000}, async t => {
+  const h = await setup(t, {catalogUpdates: true});
+  const rpc = await h.start();
+  await until(() => h.fixture.stats().catalogs === 1, 'catalog monitoring active');
+  h.fixture.failCatalogUpdates();
+  const warning = 'MCP Events catalog updates stopped for local. Watch definitions may be outdated. Use /reload to reconnect.';
+  await until(async () => (await rpc.getMessages()).some(message => message.content === warning), 'catalog failure warning');
+  const content = await watchStatus(rpc);
+  assert.ok(content.includes('Catalog updates stopped for local.'));
+  assert.ok(content.includes('3 running watch(es)'));
+  assert.ok(!JSON.stringify(await rpc.getMessages()).includes('private-test-detail'));
+  await delay(200);
+  assert.ok(!existsSync(h.contexts), 'catalog warning and status do not start a model turn');
+  assert.equal((await rpc.getMessages()).filter(message => message.content === warning).length, 1);
+  await h.emit(600); await h.received(600);
+  await rpc.prompt('/mcp-events stop');
+  assert.ok(!(await watchStatus(rpc)).includes('Catalog updates stopped for local.'));
+  assert.equal((await rpc.getMessages()).filter(message => message.content === warning).length, 1, 'intentional shutdown adds no warning');
+});
 
 test('subscription status identifies each watch and retains stopped and failed watches', {timeout: 45_000}, async t => {
   const h = await setup(t, {configure: config => ({...config,

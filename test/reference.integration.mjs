@@ -30,6 +30,44 @@ async function setup(t, options) {
   return {server, client, wire, poll, setTime(value) { seconds = value; }};
 }
 
+for (const mode of ['poll', 'push']) {
+  test(`weather reference: ${mode} recovers a reading rejected by a stale catalog`, {timeout: 20_000}, async t => {
+    const server = await startWeatherServer({port: 0, intervalMs: 0});
+    let catalogReads = 0;
+    const wire = new EventsWire(() => createHttpTransport(new URL(server.url), {fetch: async (url, init) => {
+      const response = await fetch(url, init);
+      if (JSON.parse(init.body).method !== 'events/list') return response;
+      const body = await response.json();
+      const reading = body.result.events.find(event => event.name === 'weather.reading');
+      reading._meta = {'example.com/source': 'weather-reference'};
+      if (++catalogReads === 1) {
+        delete reading.payloadSchema.properties.daylight;
+        reading.payloadSchema.required = reading.payloadSchema.required.filter(name => name !== 'daylight');
+      }
+      return Response.json(body);
+    }}));
+    const client = new EventsClient(wire, {retryMs: 10});
+    t.after(async () => { await client.close(); await server.close(); });
+    await client.connect();
+    assert.equal(client.list()[0].payloadSchema.properties.daylight, undefined);
+    assert.deepEqual(client.list()[0]._meta, {'example.com/source': 'weather-reference'});
+    const events = [];
+    const watch = client.watch({name: 'weather.reading', arguments: {}, mode}, item => {
+      if (item.type === 'event') events.push(item.event);
+    });
+    await watch.ready;
+    const [reading] = server.advance();
+    await until(() => events.length === 1);
+    assert.equal(catalogReads, 2, 'payload mismatch reads the current weather catalog once');
+    assert.deepEqual(events[0].data, reading.data);
+    assert.equal(events[0].eventId, reading.eventId);
+    assert.equal(watch.status, 'active');
+    assert.ok(watch.cursor);
+    assert.deepEqual(client.list()[0]._meta, {'example.com/source': 'weather-reference'});
+    await watch.stop();
+  });
+}
+
 test('weather reference: discovery, validation, filtering, pagination, and stable replay IDs', async t => {
   const {server, client, wire, poll} = await setup(t);
   assert.deepEqual(client.list().map(event => [event.name, event.delivery]), [
