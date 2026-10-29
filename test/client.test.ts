@@ -209,7 +209,7 @@ describe('poll delivery', () => {
     expect(checkpoint).not.toHaveBeenCalled();
     expect(accept.mock.calls.flat().filter(item => item.type === 'event')).toHaveLength(0);
   });
-  it.each([-32601, -32602, -32024, -32025, -32026])('stops on non-retryable protocol error %i', async code => {
+  it.each([-32601, -32602, -32024, -32026])('stops on non-retryable protocol error %i', async code => {
     const {client, transport, polls} = setup();
     await client.connect();
     const watch = client.watch(options, () => {});

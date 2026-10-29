@@ -58,6 +58,7 @@ export type ClientOptions = {
 };
 const clientSchema = clientSettingsSchema.extend({webhookReceiver: z.instanceof(WebhookReceiver).optional()});
 type CatalogEntry = EventContract | {descriptor: EventDescriptor; error: EventsClientError};
+class StalledPollError extends Error {}
 
 function needsRediscovery(error: unknown): boolean {
   if (!(error instanceof EventProtocolError)) return false;
@@ -228,10 +229,11 @@ export class EventsClient {
         signal.throwIfAborted();
         validateEvent(event);
       }
-      if (seen.has(event.eventId)) return;
+      if (seen.has(event.eventId)) return false;
       await deliver({type: 'event', event});
       seen.add(event.eventId);
       if (seen.size > this.settings.maxTrackedEventIds) seen.delete(seen.values().next().value!);
+      return true;
     };
     const rediscover = async () => {
       await retry(() => this.refresh());
@@ -239,10 +241,10 @@ export class EventsClient {
       await deliver({type: 'gap', cursor: null});
       await advance(null);
     };
-    const fetchPoll = () => retry(() => this.request(EventMethod.Poll, {
+    const fetchPoll = () => this.request(EventMethod.Poll, {
       name: options.name, arguments: options.arguments, cursor, maxEvents: options.maxEvents,
       ...(options.maxAgeMs === undefined ? {} : {maxAgeMs: options.maxAgeMs}),
-    }, pollResult, signal));
+    }, pollResult, signal);
     const readPoll = async () => {
       try { return await fetchPoll(); }
       catch (error) {
@@ -253,18 +255,28 @@ export class EventsClient {
     };
     const poll = async () => {
       while (!signal.aborted) {
-        this.contract(options);
-        const result = await readPoll();
-        if (result.events.length > options.maxEvents) throw new EventsClientError(ErrorCode.InvalidResponse, 'Poll response exceeds the requested batch size', {details: {maxEvents: options.maxEvents}});
-        if (Buffer.byteLength(JSON.stringify(result)) > this.settings.maxPollBytes) throw limitExceeded('maxPollBytes', this.settings.maxPollBytes);
-        if (result.cursor !== null && result.truncated) await deliver({type: 'gap', cursor: result.cursor});
-        for (const event of result.events) {
-          signal.throwIfAborted();
-          await emit(event);
-        }
-        await advance(result.cursor);
-        currentStatus = 'active';
-        ready.resolve();
+        const result = await retryOperation(async () => {
+          this.contract(options);
+          const result = await readPoll();
+          if (result.events.length > options.maxEvents) throw new EventsClientError(ErrorCode.InvalidResponse, 'Poll response exceeds the requested batch size', {details: {maxEvents: options.maxEvents}});
+          if (Buffer.byteLength(JSON.stringify(result)) > this.settings.maxPollBytes) throw limitExceeded('maxPollBytes', this.settings.maxPollBytes);
+          let progressed = result.cursor !== cursor;
+          if (result.cursor !== null && result.truncated) await deliver({type: 'gap', cursor: result.cursor});
+          for (const event of result.events) {
+            signal.throwIfAborted();
+            if (await emit(event)) progressed = true;
+          }
+          await advance(result.cursor);
+          currentStatus = 'active';
+          ready.resolve();
+          if (result.hasMore && !progressed) throw new StalledPollError('Poll backlog did not advance its cursor or deliver a new event');
+          return result;
+        }, {
+          ...this.settings, signal, onRetry: () => status('retrying'),
+          randomize: true, retryFloorMs: this.settings.pollFloorMs,
+          shouldRetry: error => error instanceof StalledPollError || retryable(error)
+            || (error instanceof EventProtocolError && error.code === EventProtocolErrorCode.ResourceExhausted),
+        });
         if (!result.hasMore) await delay(Math.max(this.settings.pollFloorMs, result.nextPollMs), {signal});
       }
     };
