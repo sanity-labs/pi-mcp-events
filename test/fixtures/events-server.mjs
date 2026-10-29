@@ -42,6 +42,7 @@ export async function startFixture(tls, {catalogUpdates = false, extraEvents = [
   const webhooks = new Map();
   const history = createEventLog();
   const requests = [];
+  const requestErrors = new Map();
   let verifications = 0;
   let deliveries = 0;
   let webhookDeliveryStatus;
@@ -105,6 +106,8 @@ export async function startFixture(tls, {catalogUpdates = false, extraEvents = [
     assert.equal(request.url, '/mcp');
     const params = body.params ?? {};
     requests.push({method: body.method, params});
+    const error = requestErrors.get(body.method);
+    if (error) { send(response, {jsonrpc: '2.0', id: body.id, error}); return; }
     const reply = result => send(response, {jsonrpc: '2.0', id: body.id, result: {resultType: 'complete', ...result}});
     const channel = params.arguments?.channel;
     switch (body.method) {
@@ -173,6 +176,12 @@ export async function startFixture(tls, {catalogUpdates = false, extraEvents = [
     return {
       connection: {baseUrl, url: `${baseUrl}/mcp`, token, callbackOrigin, callbackPort, callbackTls: false, webhookEventName: 'example.live_changed', webhookReplay: false},
       requests,
+      setRequestError(method, error) {
+        if (error) requestErrors.set(method, error);
+        else requestErrors.delete(method);
+      },
+      sourceError(error) { for (const stream of streams) notify(stream, 'error', {error}); },
+      gap() { for (const stream of streams) notify(stream, 'active', {cursor: history.cursor(stream.key), truncated: true}); },
       setWebhookDeliveryStatus(status) { webhookDeliveryStatus = status; },
       setExtraEvents(events) {
         extraEvents = events;
@@ -184,9 +193,9 @@ export async function startFixture(tls, {catalogUpdates = false, extraEvents = [
         })}\n\n`);
       },
       disconnect() { for (const stream of streams) stream.response.end(); },
-      terminateStreams() {
+      terminateStreams(error = {code: -32024, message: 'Fixture subscription ended'}) {
         for (const stream of streams) {
-          notify(stream, 'terminated', {error: {code: -32024, message: 'Fixture subscription ended'}});
+          notify(stream, 'terminated', {error});
           stream.response.end();
         }
       },

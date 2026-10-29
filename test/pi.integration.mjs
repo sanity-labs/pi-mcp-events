@@ -168,6 +168,53 @@ test('catalog monitoring failures warn without a model turn and keep watches wor
   assert.equal((await rpc.getMessages()).filter(message => message.content === warning).length, 1, 'intentional shutdown adds no warning');
 });
 
+test('operational status stays out of model turns while events and gaps still wake the agent', {timeout: 45_000}, async t => {
+  const h = await setup(t, {configure: config => ({...config, client: {...config.client, webhookRefreshMs: 100}})});
+  h.fixture.setWebhookDeliveryStatus({active: true, lastError: null});
+  const rpc = await h.start();
+  await until(() => h.fixture.requests.filter(request => request.method === 'events/subscribe').length >= 3, 'repeated healthy refreshes');
+  h.fixture.sourceError({code: -32603, message: 'private-test-detail', data: {reason: 'private-test-reason'}});
+  await until(async () => (await watchStatus(rpc)).includes('server reported an error'), 'source diagnostic is inspectable');
+  const before = h.fixture.requests.filter(request => request.method === 'events/stream').length;
+  h.fixture.disconnect();
+  await until(() => h.fixture.requests.filter(request => request.method === 'events/stream').length > before, 'stream retries');
+  await delay(300);
+  assert.ok(!existsSync(h.contexts), 'healthy refreshes, source errors, retries and status inspection never invoke the model');
+  assert.equal(batches(await rpc.getMessages()).length, 0, 'operational status is not sent to the conversation');
+  assert.ok(!JSON.stringify(await rpc.getMessages()).includes('private-test'));
+  h.fixture.gap();
+  await until(async () => observations(await rpc.getMessages()).some(item => item.observation.type === 'gap'), 'gap reaches the conversation');
+  await until(() => existsSync(h.contexts), 'gap invokes the model for reconciliation');
+  await h.emit(601); await h.received(601);
+  assert.ok(!(await watchStatus(rpc)).includes('server reported an error'), 'accepted event clears prior source failure');
+  assert.ok(observations(await rpc.getMessages()).every(item => item.observation.type !== 'status'));
+  assert.ok(!readFileSync(h.contexts, 'utf8').includes('private-test'));
+});
+
+test('terminal diagnostics retain known causes without invoking the model or exposing server text', {timeout: 45_000}, async t => {
+  const h = await setup(t, {configure: config => ({...config, client: {...config.client, webhookRefreshMs: 100, maxRetries: 1}})});
+  const rpc = await h.start();
+  h.fixture.setRequestError('events/poll', {code: -32025, message: 'private-test-quota', data: {max: 'private-test-value'}});
+  h.fixture.setRequestError('events/subscribe', {code: -32027, message: 'https://private-test.invalid/secret', data: {reason: 'challenge_failed', body: 'private-test-body'}});
+  h.fixture.terminateStreams({code: -32024, message: 'private-test-access'});
+  await until(async () => {
+    const status = await watchStatus(rpc);
+    return status.includes('0 running watch(es)') && status.includes('quotas') && status.includes('challenge handling') && status.includes('denied access');
+  }, 'all terminal causes retained in status');
+  const messages = await rpc.getMessages();
+  for (const reason of ['quotas', 'challenge handling', 'denied access']) {
+    assert.ok(messages.some(message => message.customType === 'mcp-events-status' && message.content.startsWith('MCP Events watch') && message.content.includes(reason)), reason);
+  }
+  assert.ok((await watchStatus(rpc)).includes('Retry limit reached.'));
+  assert.ok(!JSON.stringify(messages).includes('private-test'));
+  await delay(200);
+  assert.ok(!existsSync(h.contexts), 'terminal failures and status inspection never invoke the model');
+  h.fixture.setRequestError('events/poll', undefined);
+  await rpc.prompt('/mcp-events start poll');
+  await until(async () => (await watchStatus(rpc)).includes('poll: active'), 'watch restarts');
+  assert.ok(!(await watchStatus(rpc)).includes('quotas'), 'restart clears old terminal reason');
+});
+
 test('subscription status identifies each watch and retains stopped and failed watches', {timeout: 45_000}, async t => {
   const h = await setup(t, {configure: config => ({...config,
     servers: {...config.servers, unauthorized: {...config.servers.local, headers: {Authorization: 'Bearer private-test-credential'}}},
@@ -385,10 +432,10 @@ test('Pi reports an active webhook after a refresh reactivates suspended deliver
   const rpc = await h.start();
   writeFileSync(h.release, 'continue');
   h.fixture.setWebhookDeliveryStatus({active: false, lastError: 'timeout'});
-  await until(async () => observations(await rpc.getMessages()).some(item => item.watch === 'webhook'
-    && item.observation.type === 'status' && item.observation.status === 'webhook-delivery'
-    && item.observation.deliveryStatus.active === false), 'prior suspension diagnostic reaches the conversation');
-  h.fixture.setWebhookDeliveryStatus(undefined);
+  await until(async () => (await watchStatus(rpc)).includes('Webhook delivery resumed after suspension.'), 'prior suspension diagnostic is inspectable');
+  assert.ok(!existsSync(h.contexts), 'suspension recovery status never invokes the model');
+  h.fixture.setWebhookDeliveryStatus({active: true, lastError: null});
+  await until(async () => !(await watchStatus(rpc)).includes('Webhook delivery resumed after suspension.'), 'healthy refresh clears prior suspension diagnostic');
   assert.ok((await watchStatus(rpc)).includes('webhook: active'));
   await h.emit(43); await h.received(43);
   assert.ok((await watchStatus(rpc)).includes('webhook: active'));

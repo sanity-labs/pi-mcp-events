@@ -5,6 +5,7 @@ import {getAgentDir, type ExtensionAPI, type ExtensionContext} from '@earendil-w
 import {EventsClient, type Watch, type WatchOptions} from './client.ts';
 import {createReceiver, createTransport, readConfig} from './config.ts';
 import {ConversationDelivery} from './conversation.ts';
+import {failureDiagnostic, webhookDiagnostic} from './diagnostics.ts';
 import {EventsClientError, EventsClientErrorCode} from './errors.ts';
 import {MESSAGE_TYPE, OBSERVATION_EVENT, STATUS_MESSAGE_TYPE} from './pi-contract.ts';
 import {renderEventMessage} from './message-renderer.ts';
@@ -17,6 +18,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 type SessionWatch = Pick<WatchOptions, 'name' | 'mode'> & {
   server: string; watch?: Watch; start?: () => Promise<void>; starting?: Promise<void>;
   failure?: 'connection failed' | 'could not start' | 'unsupported schema' | 'failed';
+  diagnostic?: string; sourceDiagnostic?: string; webhookDiagnostic?: string;
 };
 type ActiveSession = {
   closed: boolean; clients: Map<string, {client: EventsClient; ready: Promise<void>; catalogFailed?: boolean}>; watches: Map<string, SessionWatch>;
@@ -93,7 +95,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
         }).catch(async error => {
           if (session.clients.get(server)?.client === client) session.clients.delete(server);
           await client.close().catch(() => {});
-          if (!session.closed) report(`MCP Events could not connect to ${server}. Check its configuration, credentials, and protocol support.`);
+          if (!session.closed) report(`MCP Events could not connect to ${server}. ${failureDiagnostic(error)}`);
           throw error;
         });
         const created = {client, ready};
@@ -109,13 +111,20 @@ export default function mcpEvents(pi: ExtensionAPI) {
           if (session.closed) return;
           const restarting = entry.watch !== undefined || entry.failure !== undefined;
           entry.failure = undefined;
+          entry.diagnostic = undefined;
+          entry.sourceDiagnostic = undefined;
+          entry.webhookDiagnostic = undefined;
           let client: EventsClient;
           try {
             const connected = connection(configured.server);
             await connected.ready;
             client = connected.client;
             if (restarting && !session.closed) await client.refresh();
-          } catch { entry.failure = 'connection failed'; return; }
+          } catch (error) {
+            entry.failure = 'connection failed';
+            entry.diagnostic = failureDiagnostic(error);
+            return;
+          }
           if (session.closed) return;
           try {
             const webhookIdentity = configured.mode === 'webhook' ? state.webhookIdentity(key) : undefined;
@@ -123,8 +132,14 @@ export default function mcpEvents(pi: ExtensionAPI) {
               ttlMs: state.mode !== 'persistent' && configured.ttlMs === null ? undefined : configured.ttlMs,
             }, observation => {
               if (session.closed) throw new Error('Pi session changed');
-              state.accept({server: configured.server, watch: configured.id, observation});
-              delivery.schedule();
+              if (observation.type === 'status') {
+                if (observation.status === 'source-error') entry.sourceDiagnostic = failureDiagnostic(observation.error);
+                if (observation.status === 'webhook-delivery') entry.webhookDiagnostic = webhookDiagnostic(observation.deliveryStatus);
+              } else {
+                state.accept({server: configured.server, watch: configured.id, observation});
+                if (observation.type === 'event') entry.sourceDiagnostic = undefined;
+                delivery.schedule();
+              }
               try { pi.events.emit(OBSERVATION_EVENT, {server: configured.server, watch: configured.id, observation}); }
               catch { /* Other extensions must not prevent conversation delivery. */ }
             }, cursor => {
@@ -134,22 +149,24 @@ export default function mcpEvents(pi: ExtensionAPI) {
             entry.watch = watch;
             void watch.closed.catch(error => {
               if (session.closed || entry.watch !== watch) return;
+              entry.diagnostic = failureDiagnostic(error);
               if (error instanceof EventsClientError && error.code === EventsClientErrorCode.UnsupportedEventSchema) {
                 entry.failure = 'unsupported schema';
                 report(`MCP Events watch "${configured.id}" stopped because its event schemas are unsupported or invalid. Check the server's event schemas.`);
                 return;
               }
               entry.failure = 'failed';
-              report(`MCP Events watch "${configured.id}" stopped. Check its configuration and server access.`);
+              report(`MCP Events watch "${configured.id}" stopped. ${entry.diagnostic}`);
             });
           } catch (error) {
             entry.failure = 'could not start';
+            entry.diagnostic = failureDiagnostic(error);
             if (error instanceof EventsClientError && error.code === EventsClientErrorCode.UnsupportedEventSchema) {
               entry.failure = 'unsupported schema';
               report(`MCP Events could not start watch "${configured.id}" because its event schemas are unsupported or invalid. Check the server's event schemas.`);
               return;
             }
-            report(`MCP Events could not start watch "${configured.id}". Check its event name, arguments, and delivery mode.`);
+            report(`MCP Events could not start watch "${configured.id}". ${entry.diagnostic}`);
           }
         };
         entry.start = () => {
@@ -201,7 +218,8 @@ export default function mcpEvents(pi: ExtensionAPI) {
       const session = active;
       const running = [...session?.watches.values() ?? []].filter(entry => entry.starting || (entry.watch && entry.watch.status !== 'stopped')).length;
       const watches = [...session?.watches ?? []].map(([id, entry]) =>
-        `${id}: ${entry.starting ? 'starting' : entry.failure ?? entry.watch?.status ?? 'stopped'} — ${entry.server} / ${entry.name} (${entry.mode})`);
+        [`${id}: ${entry.starting ? 'starting' : entry.failure ?? entry.watch?.status ?? 'stopped'} — ${entry.server} / ${entry.name} (${entry.mode})`,
+          ...[entry.diagnostic, entry.sourceDiagnostic, entry.webhookDiagnostic].filter(Boolean).map(text => `  ${text}`)].join('\n'));
       const catalogWarnings = [...session?.clients ?? []].filter(([, connection]) => connection.catalogFailed)
         .map(([server]) => `Catalog updates stopped for ${server}. Watch definitions may be outdated. Use /reload to reconnect.`);
       const schemaWarnings = [...session?.clients ?? []].flatMap(([server, {client}]) => client.catalogIssues
