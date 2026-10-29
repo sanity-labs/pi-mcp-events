@@ -1,7 +1,6 @@
 {
   "name": "@sanity-labs/pi-mcp-events",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "MCP Events protocol support for Pi",
   "license": "MIT",
