@@ -84,7 +84,8 @@
   "pi": {
     "extensions": [
       "./dist/extension.js"
-    ]
+    ],
+    "video": "https://cdn.sanity.io/media-libraries/al34RQcBfuD7/videos/7ef17ab43f3386c047e687ad54d3ba978df099c6.mp4"
   },
   "homepage": "https://github.com/sanity-labs/pi-mcp-events#readme",
   "bugs": {
