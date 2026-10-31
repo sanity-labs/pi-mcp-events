@@ -4,6 +4,10 @@ An implementation of the **MCP Events specification draft, [SEP-3415 pinned at `
 
 Read the story behind this extension on the Sanity engineering blog: [The dream of real-time MCP (and what stands in the way)](https://www.sanity.io/engineering/the-dream-of-real-time-mcp?utm_source=github&utm_medium=readme&utm_campaign=pi-mcp-events). It covers why agents that work alongside people need streamed events, what we measured with webhook delivery, and the gaps we found in the draft spec along the way.
 
+## Demo
+
+https://github.com/user-attachments/assets/5eccbf3b-01a5-46a6-a6b4-12388bc7d0d3
+
 ## Requirements
 
 - Node.js v24+
