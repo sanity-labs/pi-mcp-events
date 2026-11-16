@@ -209,7 +209,7 @@ Polling drains available pages immediately while the cursor advances or new even
 
 If a connection fails, the client finishes delivering events it has already received before reconnecting. This applies to disk-backed and in-memory sessions, including event types with no replay cursor. Explicitly stopping a watch cancels further delivery.
 
-Repeated short-lived streams reconnect with exponential backoff and jitter, capped at 30 seconds and bounded by `maxRetries`. The retry budget resets after accepted events or heartbeats span two configured heartbeat intervals, including on quiet streams. The client assumes a 30-second heartbeat interval by default (`heartbeatMs`); events and heartbeats refresh liveness, while repeated `active` confirmations only update cursor and gap state.
+Repeated short-lived streams reconnect with exponential backoff and jitter, capped at 30 seconds and bounded by `maxRetries`. The retry budget resets after accepted events or heartbeats span two configured heartbeat intervals, including on quiet streams. The client suggests a 30-second heartbeat interval by default (`heartbeatMs`) and uses the server’s granted interval when present. Any stream notification refreshes liveness; for older servers that omit the grant, it uses the suggested interval.
 
 ### Webhooks
 

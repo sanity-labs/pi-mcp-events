@@ -307,7 +307,7 @@ export class EventsClient {
           };
           try {
             await streamEvents(this.wire, {
-              name: options.name, arguments: options.arguments, cursor,
+              name: options.name, arguments: options.arguments, cursor, heartbeatMs: this.settings.heartbeatMs,
               ...(options.maxAgeMs === undefined ? {} : {maxAgeMs: options.maxAgeMs}),
             }, signal, this.settings.heartbeatMs, {
               active: async (next, truncated) => {

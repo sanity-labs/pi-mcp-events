@@ -178,7 +178,7 @@ it.each(['same', null])('resets recovery after sustained quiet health with curso
   await failed;
 });
 
-it('updates repeated active cursors without extending heartbeat liveness', async () => {
+it('updates repeated active cursors and extends heartbeat liveness', async () => {
   const s = await setup({heartbeatMs: 20});
   s.onStream(stream => notify(stream, 'active', {cursor: 'initial', truncated: false}));
   const watch = s.client.watch(options, () => {});
@@ -189,7 +189,9 @@ it('updates repeated active cursors without extending heartbeat liveness', async
     await flush();
     expect(watch.cursor).toBe(`active-${i}`);
   }
-  await vi.advanceTimersByTimeAsync(10);
+  await vi.advanceTimersByTimeAsync(59);
+  expect(watch.status).toBe('active');
+  await vi.advanceTimersByTimeAsync(1);
   expect(watch.status).toBe('retrying');
   await vi.advanceTimersByTimeAsync(15);
   expect(s.streams).toHaveLength(2);
@@ -201,7 +203,7 @@ it('keeps the default 30-second heartbeat assumption', async () => {
   s.onStream(stream => notify(stream, 'active', {cursor: 'active', truncated: false}));
   const watch = s.client.watch(options, () => {});
   await flush();
-  await vi.advanceTimersByTimeAsync(59_999);
+  await vi.advanceTimersByTimeAsync(89_999);
   expect(s.streams).toHaveLength(1);
   expect(watch.status).toBe('active');
   await vi.advanceTimersByTimeAsync(16);

@@ -84,7 +84,9 @@ export const subscribeResult = completeResult.extend({
 });
 export type WebhookDeliveryStatus = NonNullable<z.infer<typeof subscribeResult>['deliveryStatus']>;
 export const remoteError = z.object({code: z.number().int(), message: z.string(), data: record.optional()});
-export const activeNotification = z.object({cursor, truncated: z.boolean()});
+export const activeNotification = z.object({
+  cursor, truncated: z.boolean(), heartbeatMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER / 3).optional(),
+});
 export const heartbeatNotification = z.object({cursor});
 export const errorNotification = z.object({error: remoteError});
 

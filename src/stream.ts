@@ -21,26 +21,25 @@ export async function streamEvents(
   const attempt = new AbortController();
   const streamSignal = AbortSignal.any([signal, attempt.signal]);
   let active = false;
-  let processing = false;
-  let lastSeen = Date.now();
-  const monitor = async () => {
-    while (!streamSignal.aborted) {
-      await delay(heartbeatMs, {signal: streamSignal});
-      // Consumer backpressure is not a dead connection.
-      if (!processing && Date.now() - lastSeen >= heartbeatMs * 2) {
-        attempt.abort(new EventsClientError(ErrorCode.RequestFailed, 'Event stream heartbeat expired'));
-      }
-    }
+  let grantedHeartbeatMs = heartbeatMs;
+  let deadline = new AbortController();
+  const resetDeadline = (timeoutMs: number) => {
+    deadline.abort();
+    deadline = new AbortController();
+    const deadlineSignal = AbortSignal.any([streamSignal, deadline.signal]);
+    void delay(timeoutMs, {signal: deadlineSignal}).then(() => {
+      attempt.abort(new EventsClientError(ErrorCode.RequestFailed, 'Event stream heartbeat expired'));
+    }).catch(() => {});
   };
-  const monitoring = monitor().catch(() => {});
+  resetDeadline(heartbeatMs * 2);
   try {
     await wire.stream(EventMethod.Stream, params, streamSignal, async (method, value) => {
-      processing = true;
+      deadline.abort();
       try {
         if (method === EventNotification.Active) {
           const message = activeNotification.parse(value);
+          grantedHeartbeatMs = message.heartbeatMs ?? grantedHeartbeatMs;
           await handlers.active(message.cursor, message.truncated);
-          if (!active) lastSeen = Date.now();
           active = true;
           return;
         }
@@ -48,11 +47,9 @@ export async function streamEvents(
         switch (method) {
           case EventNotification.Event:
             await handlers.event(occurrence.parse(value));
-            lastSeen = Date.now();
             return;
           case EventNotification.Heartbeat:
             await handlers.heartbeat(heartbeatNotification.parse(value).cursor);
-            lastSeen = Date.now();
             return;
           case EventNotification.Error:
             await handlers.sourceError(new EventProtocolError(errorNotification.parse(value).error));
@@ -67,7 +64,9 @@ export async function streamEvents(
       } catch (error) {
         if (error instanceof z.ZodError) throw new EventsClientError(ErrorCode.InvalidResponse, 'Invalid event stream notification', {cause: error});
         throw error;
-      } finally { processing = false; }
+      } finally {
+        if (active && !streamSignal.aborted) resetDeadline(grantedHeartbeatMs * 3);
+      }
     });
     if (!active) throw new EventsClientError(ErrorCode.InvalidResponse, 'Event stream did not begin with active');
     throw new EventsClientError(ErrorCode.RequestFailed, 'Event stream ended');
@@ -76,6 +75,6 @@ export async function streamEvents(
     throw error;
   } finally {
     attempt.abort();
-    await monitoring;
+    deadline.abort();
   }
 }
