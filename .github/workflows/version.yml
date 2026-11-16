@@ -43,9 +43,8 @@ jobs:
       - run: npm run validate
       - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
+          github-token: ${{ steps.app.outputs.token }}
           version-script: npm run version-packages
           pr-title: 'chore: version packages'
           commit-message: 'chore: version packages'
           create-github-releases: false
-        env:
-          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
