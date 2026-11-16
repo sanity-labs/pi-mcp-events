@@ -1,5 +1,12 @@
 # @sanity-labs/pi-mcp-events
 
+## 0.1.2
+
+### Patch Changes
+
+- 9fc87e4: Use the server’s heartbeat interval to detect disconnected event streams.
+- 340f64b: Spread event stream reconnections over time after a disconnect.
+
 ## 0.1.1
 
 ### Patch Changes
