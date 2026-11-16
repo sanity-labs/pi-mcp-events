@@ -2,7 +2,7 @@ import {z} from 'zod';
 import {createRequire} from 'node:module';
 import {ProtocolErrorCode} from '@modelcontextprotocol/client';
 
-// Pinned draft: https://github.com/modelcontextprotocol/modelcontextprotocol/blob/b0efd116faca84c9caad109ccf0778da4dc49579/seps/0000-events-extension.md
+// Pinned proposal: https://github.com/pja-ant/modelcontextprotocol/blob/4165cc2e580afa795842002f631edbbe17c63757/seps/3415-events-extension.md
 export const PROTOCOL_VERSION = '2026-07-28';
 export const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
 export const SUBSCRIPTION_ID = 'io.modelcontextprotocol/subscriptionId';
