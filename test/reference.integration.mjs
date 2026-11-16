@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import {existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {readCompleteJsonLines} from './fixtures/jsonl.mjs';
 import {request} from 'node:http';
 import {setTimeout as delay} from 'node:timers/promises';
 import {pathToFileURL} from 'node:url';
@@ -486,8 +487,7 @@ JSON`);
       return events.filter(item => item.watch === 'readings').length === 6
         && alerts.some(event => event.status === 'raised') && alerts.some(event => event.status === 'cleared');
     });
-    await until(() => existsSync(contexts) && readFileSync(contexts, 'utf8').trim().split('\n').some(line => {
-      const context = JSON.parse(line);
+    await until(() => readCompleteJsonLines(contexts).some(context => {
       return JSON.stringify(context.messages).includes(presenter) && JSON.stringify(context.messages).includes('weather.reading');
     }));
   });
