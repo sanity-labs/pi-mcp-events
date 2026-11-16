@@ -238,12 +238,12 @@ describe('event streaming', () => {
     expect(requests).toHaveLength(3);
   });
 
-  it('reconnects a silent stream after twice the heartbeat interval and cancels timers on stop', async () => {
+  it('reconnects a silent stream after three heartbeat intervals and cancels timers on stop', async () => {
     const {client, requests, active} = setup();
     await client.connect();
     const watch = client.watch(options, () => {});
     await flush(); active(requests[0]!); await watch.ready;
-    await vi.advanceTimersByTimeAsync(199);
+    await vi.advanceTimersByTimeAsync(299);
     expect(requests).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(11);
     expect(requests).toHaveLength(2);
@@ -252,6 +252,37 @@ describe('event streaming', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(requests).toHaveLength(2);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([50, 250])('uses the server heartbeat grant of %i ms instead of the suggested interval', async granted => {
+    const {client, transport, requests} = setup();
+    await client.connect();
+    const watch = client.watch(options, () => {});
+    await flush();
+    expect(requests[0]!.params?.heartbeatMs).toBe(100);
+    transport.notify(requests[0]!, 'active', {cursor: 'active', truncated: false, heartbeatMs: granted});
+    await watch.ready;
+    await vi.advanceTimersByTimeAsync(granted * 3 - 1);
+    expect(requests).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(11);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.params?.cursor).toBe('active');
+  });
+
+  it('retains the server heartbeat grant when a later active notification omits it', async () => {
+    const {client, transport, requests} = setup();
+    await client.connect();
+    const watch = client.watch(options, () => {});
+    await flush();
+    transport.notify(requests[0]!, 'active', {cursor: 'first', truncated: false, heartbeatMs: 250});
+    await watch.ready;
+    transport.notify(requests[0]!, 'active', {cursor: 'second', truncated: false});
+    await flush();
+    await vi.advanceTimersByTimeAsync(749);
+    expect(requests).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(11);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.params?.cursor).toBe('second');
   });
 
   it('supports heartbeat intervals beyond the native timer limit', async () => {
@@ -338,7 +369,7 @@ describe('event streaming', () => {
     expect(requests[1]!.params?.cursor).toBe('accepted');
   });
 
-  it('keeps idle heartbeat cursors current and treats source errors as insufficient liveness', async () => {
+  it('keeps idle heartbeat cursors current and counts source errors as liveness', async () => {
     const {client, transport, requests, active} = setup();
     await client.connect();
     const watch = client.watch(options, () => {});
@@ -351,7 +382,9 @@ describe('event streaming', () => {
     expect(requests).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(100);
     transport.notify(requests[0]!, 'error', {error: {code: -32603, message: 'upstream unavailable'}});
-    await vi.advanceTimersByTimeAsync(110);
+    await vi.advanceTimersByTimeAsync(299);
+    expect(requests).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(11);
     expect(requests).toHaveLength(2);
     expect(requests[1]!.params?.cursor).toBe('idle-3');
   });
