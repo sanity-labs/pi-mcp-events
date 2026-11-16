@@ -8,6 +8,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {test} from 'node:test';
 import {cliPath, modelPath, root, RpcClient} from './fixtures/installed-package.mjs';
 import {startFixture} from './fixtures/events-server.mjs';
+import {readCompleteJsonLines} from './fixtures/jsonl.mjs';
 
 const modes = ['poll', 'push', 'webhook'];
 async function until(check, description) {
@@ -87,8 +88,7 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, cat
     return modes.every(mode => delivered.some(([watch, found]) => watch === mode && found === value));
   }, `all modes delivered ${value}`);
   const accepted = value => until(() => {
-    if (!existsSync(acceptedPath)) return false;
-    const items = readFileSync(acceptedPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    const items = readCompleteJsonLines(acceptedPath);
     return modes.every(mode => items.some(item => item.watch === mode && item.observation.type === 'event' && item.observation.event.data.value === value));
   }, `all modes accepted ${value}`);
   const hold = async () => {
@@ -255,8 +255,7 @@ test('subscription status identifies each watch and retains stopped and failed w
 
 test('watch control confirmations reach model context without starting extra turns, including while busy', {timeout: 45_000}, async t => {
   const h = await setup(t); const rpc = await h.start();
-  const contexts = () => existsSync(h.contexts)
-    ? readFileSync(h.contexts, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+  const contexts = () => readCompleteJsonLines(h.contexts);
   const messageText = message => typeof message.content === 'string'
     ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
   const commands = [
