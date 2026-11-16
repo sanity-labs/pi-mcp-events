@@ -343,6 +343,7 @@ export class EventsClient {
           shouldRetry: error => retryable(error) || needsRediscovery(terminationReason(error)),
         });
         await status('retrying');
+        await delay(Math.random() * this.settings.retryMs, {signal});
       }
     };
     const webhook = async () => {

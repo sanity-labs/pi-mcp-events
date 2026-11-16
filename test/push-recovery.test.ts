@@ -167,6 +167,8 @@ it.each(['same', null])('resets recovery after sustained quiet health with curso
     }
     stream.transport.respond(stream.request, {});
     await flush();
+    expect(s.streams).toHaveLength(i + 1);
+    await vi.advanceTimersByTimeAsync(5);
     expect(s.streams).toHaveLength(i + 2);
   }
   const failed = expect(watch.closed).rejects.toMatchObject({code: ErrorCode.RetryExhausted});
@@ -221,7 +223,7 @@ it.each(['heartbeat', 'duplicate-event', 'new-event'])('bounds schema recovery w
     if (s.streams.length <= 4) terminateSchema(stream);
   });
   const watch = s.client.watch(options, () => {});
-  await flush();
+  await vi.advanceTimersByTimeAsync(5);
   expect(s.streams).toHaveLength(2);
   expect(s.catalogs).toBe(2);
   await vi.advanceTimersByTimeAsync(14);
@@ -252,7 +254,7 @@ it.each([
     if (s.streams.length <= 2) notify(stream, 'terminated', {error});
   });
   const watch = s.client.watch(options, () => {});
-  await flush();
+  await vi.advanceTimersByTimeAsync(5);
   expect(s.streams).toHaveLength(2);
   await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.RetryExhausted});
   expect(s.catalogs).toBe(2);
@@ -267,10 +269,10 @@ it.each(['same', null])('resets schema recovery only after sustained quiet healt
   const watch = s.client.watch(options, () => {});
   await flush();
   terminateSchema(s.streams[0]!);
-  await flush();
+  await vi.advanceTimersByTimeAsync(5);
   expect(s.streams).toHaveLength(2);
   terminateSchema(s.streams[1]!);
-  await flush();
+  await vi.advanceTimersByTimeAsync(5);
   expect(s.streams).toHaveLength(2);
   await vi.advanceTimersByTimeAsync(15);
   expect(s.streams).toHaveLength(3);
@@ -280,7 +282,7 @@ it.each(['same', null])('resets schema recovery only after sustained quiet healt
     await flush();
   }
   terminateSchema(s.streams[2]!);
-  await flush();
+  await vi.advanceTimersByTimeAsync(5);
   expect(s.streams).toHaveLength(4);
   terminateSchema(s.streams[3]!);
   await flush();
@@ -302,7 +304,7 @@ it('shares the stream retry budget across schema terminations and connection fai
     else stream.transport.respond(stream.request, {});
   });
   const watch = s.client.watch(options, () => {});
-  await flush();
+  await vi.advanceTimersByTimeAsync(5);
   expect(s.streams).toHaveLength(2);
   await vi.advanceTimersByTimeAsync(15);
   expect(s.streams).toHaveLength(3);
@@ -322,7 +324,7 @@ it('cancels schema-recovery backoff without another stream or catalog read', asy
     if (s.streams.length <= 2) terminateSchema(stream);
   });
   const watch = s.client.watch(options, () => {});
-  await flush();
+  await vi.advanceTimersByTimeAsync(5);
   expect(s.streams).toHaveLength(2);
   await watch.stop();
   await vi.advanceTimersByTimeAsync(1000);
@@ -340,7 +342,7 @@ it('keeps authorization termination fatal after schema recovery', async () => {
     else notify(stream, 'terminated', {error: {code: -32024, message: 'Access revoked'}});
   });
   const watch = s.client.watch(options, () => {});
-  await flush();
+  await vi.advanceTimersByTimeAsync(5);
   await expect(watch.closed).rejects.toMatchObject({code: ErrorCode.SubscriptionTerminated, cause: {code: -32024}});
   expect(s.streams).toHaveLength(2);
   expect(s.catalogs).toBe(2);
