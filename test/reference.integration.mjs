@@ -507,3 +507,45 @@ JSON`);
     }));
   });
 }
+
+test('weather reference: annotated station headers are required and decoded on every HTTP Events method', async t => {
+  const server = await startWeatherServer({port: 0, intervalMs: 0, webhookToken: 'test-token'});
+  let captured;
+  const wire = new EventsWire(() => createHttpTransport(new URL(server.url), {fetch: (url, init) => {
+    if (JSON.parse(init.body).method === 'events/poll') captured = init;
+    return fetch(url, init);
+  }}));
+  const client = new EventsClient(wire);
+  t.after(async () => { await client.close(); await server.close(); });
+  await client.connect();
+  assert.equal(client.list()[0].inputSchema.properties.stationId['x-mcp-header'], 'Station');
+  await wire.request('events/poll', {name: 'weather.reading', arguments: {stationId: 'harbor'}, cursor: null}, result);
+  assert.equal(new Headers(captured.headers).get('Mcp-Param-Station'), 'harbor');
+  const send = async (method, value, args = {stationId: 'harbor'}) => {
+    const headers = new Headers(captured.headers);
+    headers.set('Mcp-Method', method);
+    headers.set('Authorization', 'Bearer test-token');
+    if (value === undefined) headers.delete('Mcp-Param-Station');
+    else headers.set('Mcp-Param-Station', value);
+    const body = JSON.parse(captured.body);
+    body.method = method;
+    body.params.arguments = args;
+    return fetch(server.url, {...captured, headers, body: JSON.stringify(body)});
+  };
+  for (const method of ['events/poll', 'events/stream', 'events/subscribe', 'events/unsubscribe']) {
+    for (const header of [undefined, 'hilltop', '=?base64?%%%?=', 'café']) {
+      const response = await send(method, header);
+      assert.equal(response.status, 400, `${method}: ${header}`);
+      assert.equal((await response.json()).error.code, -32020);
+    }
+  }
+  const encoded = await send('events/poll', '=?base64?aGFyYm9y?=');
+  assert.equal(encoded.status, 200);
+  assert.ok((await encoded.json()).result.cursor);
+  const absent = await send('events/poll', undefined, {});
+  assert.equal(absent.status, 200);
+  await absent.arrayBuffer();
+  const stale = await send('events/poll', 'harbor', {});
+  assert.equal(stale.status, 400);
+  await stale.arrayBuffer();
+});

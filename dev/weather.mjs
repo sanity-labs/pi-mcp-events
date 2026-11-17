@@ -1,6 +1,6 @@
 import {z} from 'zod';
 
-export const subscriptionArguments = z.strictObject({stationId: z.string().min(1).optional()});
+export const subscriptionArguments = z.strictObject({stationId: z.string().min(1).meta({'x-mcp-header': 'Station'}).optional()});
 const condition = z.enum(['clear', 'cloudy', 'rain', 'storm']);
 const reading = {
   stationId: z.string(), station: z.string(), condition,

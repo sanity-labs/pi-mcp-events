@@ -1,32 +1,38 @@
 import {randomUUID} from 'node:crypto';
+import {encodeHeaderValue as nameHeader} from './argument-headers.ts';
 import {boundedResponse, defaultResponseLimits, type ResponseLimits} from './http-limits.ts';
 import {
-  Client, type JSONRPCMessage, type Transport, type TransportSendOptions,
+  Client, ProtocolError, type JSONRPCMessage, type Transport, type TransportSendOptions,
   type StandardSchemaV1, type RequestOptions, StreamableHTTPClientTransport,
   type StreamableHTTPClientTransportOptions,
 } from '@modelcontextprotocol/client';
 import {
   EVENTS_EXTENSION, PROTOCOL_VERSION, SUBSCRIPTION_ID, clientCapabilities,
-  clientInfo, record, remoteError, EventMethod, EventProtocolError,
+  clientInfo, record, remoteError, EventMethod, EventProtocolError, EventProtocolErrorCode,
 } from './protocol.ts';
+
+export {nameHeader};
 
 type Stream = {
   receive(message: JSONRPCMessage): void;
   end(error?: unknown): void;
   disconnect(error: unknown): void;
 };
-type HttpState = ResponseLimits & {ceilings: Partial<ResponseLimits>; onLimit?(id: unknown, error: Error): void};
+type HttpState = ResponseLimits & {ceilings: Partial<ResponseLimits>; onLimit?(id: unknown, error: Error): void; headers?: HeaderProvider};
 const httpStates = new WeakMap<Transport, HttpState>();
 function applyResponseLimits(state: HttpState, limits?: ResponseLimits) {
   if (!limits) return;
   for (const key of ['maxResponseBytes', 'maxPollBytes'] as const) state[key] = Math.min(limits[key], state.ceilings[key] ?? Infinity);
 }
 
-export function nameHeader(name: string): string {
-  // eslint-disable-next-line no-control-regex -- HTTP field values allow horizontal tabs.
-  if (name.length > 0 && name.trim() === name && /^[\x09\x20-\x7e]+$/.test(name)
-    && !(name.startsWith('=?base64?') && name.endsWith('?='))) return name;
-  return `=?base64?${Buffer.from(name).toString('base64')}?=`;
+type HeaderProvider = (name: string, args: unknown) => Record<string, string>;
+const headerMethods = new Set<string>([EventMethod.Poll, EventMethod.Stream, EventMethod.Subscribe, EventMethod.Unsubscribe]);
+function parameterHeaders(headers: Headers, method: string, params: Record<string, unknown> | undefined, provider?: HeaderProvider) {
+  if (!provider) return;
+  for (const name of [...headers.keys()]) if (name.toLowerCase().startsWith('mcp-param-')) headers.delete(name);
+  if (headerMethods.has(method) && typeof params?.name === 'string') {
+    for (const [name, value] of Object.entries(provider(params.name, params.arguments))) headers.set(name, value);
+  }
 }
 
 export function createHttpTransport(url: URL, options: StreamableHTTPClientTransportOptions & Partial<ResponseLimits> = {}) {
@@ -46,11 +52,14 @@ export function createHttpTransport(url: URL, options: StreamableHTTPClientTrans
       const message: unknown = JSON.parse(init.body);
       const parsed = record.safeParse(message);
       if (parsed.success) request = parsed.data;
-      if (parsed.success && typeof parsed.data.method === 'string' && parsed.data.method.startsWith('events/')) {
+      if (parsed.success && typeof parsed.data.method === 'string') {
         const headers = new Headers(init.headers);
         const params = record.safeParse(parsed.data.params);
-        if (params.success && typeof params.data.name === 'string') headers.set('Mcp-Name', nameHeader(params.data.name));
-        else headers.delete('Mcp-Name');
+        parameterHeaders(headers, parsed.data.method, params.success ? params.data : undefined, state.headers);
+        if (parsed.data.method.startsWith('events/')) {
+          if (params.success && typeof params.data.name === 'string') headers.set('Mcp-Name', nameHeader(params.data.name));
+          else headers.delete('Mcp-Name');
+        }
         init = {...init, headers};
       }
     }
@@ -73,7 +82,7 @@ class EventsTransport implements Transport {
   onerror?: Transport['onerror'];
   private closed = false;
   private readonly disconnected: () => void;
-  constructor(raw: Transport, disconnected: () => void) { this.raw = raw; this.disconnected = disconnected; }
+  constructor(raw: Transport, disconnected: () => void, private headers: () => HeaderProvider | undefined) { this.raw = raw; this.disconnected = disconnected; }
   get hasPerRequestStream() { return this.raw.hasPerRequestStream; }
   get sessionId() { return this.raw.sessionId; }
   setProtocolVersion(version: string) { this.raw.setProtocolVersion?.(version); }
@@ -100,9 +109,14 @@ class EventsTransport implements Transport {
     };
     await this.raw.start();
   }
-  send(message: JSONRPCMessage, options?: TransportSendOptions) {
-    if ('method' in message && message.method.startsWith('events/') && typeof message.params?.name === 'string') {
-      options = {...options, headers: {...options?.headers, 'Mcp-Name': nameHeader(message.params.name)}};
+  async send(message: JSONRPCMessage, options?: TransportSendOptions) {
+    if ('method' in message) {
+      const headers = new Headers(options?.headers);
+      if (this.hasPerRequestStream) parameterHeaders(headers, message.method, message.params, this.headers());
+      options = {...options, headers: Object.fromEntries(headers)};
+      if (message.method.startsWith('events/') && typeof message.params?.name === 'string') {
+        options.headers = {...options.headers, 'Mcp-Name': nameHeader(message.params.name)};
+      }
     }
     return this.raw.send(message, options);
   }
@@ -121,6 +135,26 @@ export class EventsWire {
   private connecting?: Promise<Record<string, unknown>>;
   private responseLimits?: ResponseLimits;
   private connectionSignal?: AbortSignal;
+  private eventHeaders?: HeaderProvider;
+  private refreshHeaders?: (signal?: AbortSignal) => Promise<unknown>;
+  get usesHttpHeaders() { return this.transport.hasPerRequestStream === true; }
+  setEventHeaders(provider: HeaderProvider, refresh: (signal?: AbortSignal) => Promise<unknown>) {
+    this.eventHeaders = provider;
+    this.refreshHeaders = refresh;
+    const http = httpStates.get(this.transport.raw);
+    if (http) http.headers = provider;
+  }
+  private async withHeaderRecovery<T>(method: string, signal: AbortSignal | undefined, operation: () => Promise<T>, canRetry = () => true): Promise<T> {
+    try { return await operation(); }
+    catch (error) {
+      signal?.throwIfAborted();
+      if (!this.usesHttpHeaders || !headerMethods.has(method) || !this.refreshHeaders || !canRetry()
+        || !(error instanceof ProtocolError || error instanceof EventProtocolError) || error.code !== EventProtocolErrorCode.HeaderMismatch) throw error;
+      await this.refreshHeaders(signal);
+      signal?.throwIfAborted();
+      return operation();
+    }
+  }
   constructor(transport: Transport | (() => Transport)) {
     this.factory = typeof transport === 'function' ? transport : undefined;
     this.transport = this.wrap(typeof transport === 'function' ? transport() : transport);
@@ -132,9 +166,10 @@ export class EventsWire {
   private wrap(transport: Transport) {
     const wrapped = new EventsTransport(transport, () => {
       if (this.transport === wrapped) this.connected = false;
-    });
+    }, () => this.eventHeaders);
     const http = httpStates.get(transport);
     if (http) {
+      http.headers = this.eventHeaders;
       applyResponseLimits(http, this.responseLimits);
       http.onLimit = (id, error) => {
         if (typeof id === 'string') wrapped.streams.get(id)?.disconnect(error);
@@ -185,10 +220,20 @@ export class EventsWire {
   async request<S extends StandardSchemaV1>(method: string, params: Record<string, unknown>, schema: S, options?: RequestOptions) {
     await this.ensureConnected();
     options?.signal?.throwIfAborted();
-    return this.client.request({method, params}, schema, options);
+    return this.withHeaderRecovery(method, options?.signal, () => this.client.request({method, params}, schema, options));
   }
 
-  async stream(
+  stream(
+    method: typeof EventMethod.Stream | 'subscriptions/listen', params: Record<string, unknown>, signal: AbortSignal,
+    onNotification: (method: string, params: Record<string, unknown>) => Promise<void> | void,
+  ): Promise<void> {
+    let notified = false;
+    return this.withHeaderRecovery(method, signal, () => this.openStream(method, params, signal, (kind, value) => {
+      notified = true;
+      return onNotification(kind, value);
+    }), () => !notified);
+  }
+  private async openStream(
     method: typeof EventMethod.Stream | 'subscriptions/listen',
     params: Record<string, unknown>,
     signal: AbortSignal,

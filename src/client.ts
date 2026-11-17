@@ -1,3 +1,4 @@
+import {InvalidHeaderAnnotation} from './argument-headers.ts';
 import {addAbortListener} from 'node:events';
 import {ProtocolError, type StandardSchemaV1} from '@modelcontextprotocol/client';
 import delay from 'delay';
@@ -60,7 +61,7 @@ export type ClientOptions = {
   maxTrackedEventIds?: number;
 };
 const clientSchema = clientSettingsSchema.extend({webhookReceiver: z.instanceof(WebhookReceiver).optional()});
-type CatalogEntry = EventContract | {descriptor: EventDescriptor; error: EventsClientError};
+type CatalogEntry = EventContract | {descriptor: EventDescriptor; error: EventsClientError; excluded?: boolean};
 class StalledPollError extends Error {}
 
 function needsRediscovery(error: unknown): boolean {
@@ -93,6 +94,12 @@ export class EventsClient {
     if (!parsed.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid MCP Events client options', {cause: parsed.error});
     this.settings = parsed.data;
     this.wire.setResponseLimits(this.settings);
+    this.wire.setEventHeaders((name, args) => {
+      const contract = this.catalogEntries.get(name);
+      if (!contract || 'error' in contract) return {};
+      try { return contract.argumentHeaders(args); }
+      catch (error) { throw new EventsClientError(ErrorCode.InvalidArguments, 'Invalid annotated event arguments', {cause: error}); }
+    }, signal => this.refreshAfterCurrent(signal ?? this.lifetime.signal));
   }
   async connect() {
     this.assertOpen();
@@ -118,7 +125,7 @@ export class EventsClient {
       void this.catalog.closed.finally(() => { this.catalogRunning = false; }).catch(() => {});
     }
   }
-  list() { return [...this.catalogEntries.values()].map(entry => entry.descriptor); }
+  list() { return [...this.catalogEntries.values()].filter(entry => !('excluded' in entry && entry.excluded)).map(entry => entry.descriptor); }
   refresh(): Promise<EventDescriptor[]> {
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.readCatalog().finally(() => { this.refreshing = undefined; });
@@ -152,9 +159,9 @@ export class EventsClient {
       for (const descriptor of result.events) {
         if (entries.has(descriptor.name)) throw new EventsClientError(ErrorCode.InvalidCatalog, 'Duplicate event name in catalog', {details: {name: descriptor.name}});
         if (entries.size >= this.settings.maxCatalogEntries) throw limitExceeded('maxCatalogEntries', this.settings.maxCatalogEntries);
-        try { entries.set(descriptor.name, new EventContract(descriptor)); }
+        try { entries.set(descriptor.name, new EventContract(descriptor, this.wire.usesHttpHeaders)); }
         catch (error) {
-          entries.set(descriptor.name, {descriptor, error: new EventsClientError(
+          entries.set(descriptor.name, {descriptor, excluded: error instanceof InvalidHeaderAnnotation, error: new EventsClientError(
             ErrorCode.UnsupportedEventSchema, 'Event schemas are unsupported or invalid', {cause: error, details: {name: descriptor.name}},
           )});
         }
