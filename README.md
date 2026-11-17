@@ -1,6 +1,6 @@
 # Pi MCP Events
 
-An implementation of the **accepted MCP Events proposal, [SEP-3415 pinned at `4165cc2`](https://github.com/pja-ant/modelcontextprotocol/blob/4165cc2e580afa795842002f631edbbe17c63757/seps/3415-events-extension.md)**, for [Pi](https://pi.dev). Targets MCP revision `2026-07-28`; the proposal is still open and may change before it is final. Receive events through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it's ready for a follow-up turn.
+An implementation of the **accepted MCP Events proposal, [SEP-3415 pinned at `60b15c1`](https://github.com/pja-ant/modelcontextprotocol/blob/60b15c16f2e7265ea34ac51099dc5be62f734692/seps/3415-events-extension.md)**, for [Pi](https://pi.dev). Targets MCP revision `2026-07-28`; the proposal is still open and may change before it is final. Receive events through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it's ready for a follow-up turn.
 
 Read [The dream of real-time MCP (and what stands in the way)](https://www.sanity.io/engineering/the-dream-of-real-time-mcp?utm_source=github&utm_medium=readme&utm_campaign=pi-mcp-events) on the Sanity engineering blog for the product drivers behind this extension, and what we learned along the way. [Watch the demo video (MP4)](https://cdn.sanity.io/media-libraries/al34RQcBfuD7/videos/7ef17ab43f3386c047e687ad54d3ba978df099c6.mp4).
 
@@ -101,6 +101,8 @@ After reload completes, check the watches with a separate command:
 | `weather.alert` | Current reading, a storm warning message, and `raised` or `cleared` status. |
 
 All three support `poll` and `push`, with optional `"arguments": {"stationId": "harbor"}` or `"arguments": {"stationId": "hilltop"}` to follow one station. Change the configuration and `/reload` to try another event or mode. Replay keeps the last 1,000 events in memory; stale or pre-restart cursors report a gap.
+
+The HTTP demo uses the proposal’s `x-mcp-header` annotation for the station filter. The client reads it from the catalog and sends `Mcp-Param-Station` automatically.
 
 ### Run the demo over stdio
 

@@ -10,6 +10,7 @@ import {z} from 'zod';
 import {catalog, createWeather, payloads, subscriptionArguments} from './weather.mjs';
 import {createEventLog} from './event-log.mjs';
 import {createWebhookDelivery, WebhookCallbackError, WebhookLimitError} from './webhook-delivery.mjs';
+import {decodeHeaderValue} from '../src/argument-headers.ts';
 
 const revision = '2026-07-28';
 const subscriptionId = 'io.modelcontextprotocol/subscriptionId';
@@ -222,7 +223,7 @@ export async function startWeatherServer({transport = 'http', port = 3015, inter
       };
     } else {
       handler = createMcpHandler(createServerInstance, {legacy: 'reject', maxRequestBodySize: 65_536});
-      // The SDK checks core routing headers; the draft adds Mcp-Name to Events methods.
+      // The SDK checks core routing headers; Events also mirrors subscription arguments.
       const mcp = toNodeHandler({fetch: async request => {
         let body;
         if (request.method === 'POST') {
@@ -245,16 +246,17 @@ export async function startWeatherServer({transport = 'http', port = 3015, inter
           }, {status: 200});
         }
         if (['events/poll', 'events/stream', 'events/subscribe', 'events/unsubscribe'].includes(body?.method) && typeof body.params?.name === 'string') {
-          const header = request.headers.get('Mcp-Name');
-          let name = header;
-          if (header?.startsWith('=?base64?') && header.endsWith('?=')) {
-            const encoded = header.slice(9, -2);
-            const decoded = Buffer.from(encoded, 'base64');
-            name = decoded.toString('base64') === encoded ? decoded.toString('utf8') : null;
-          }
+          const name = decodeHeaderValue(request.headers.get('Mcp-Name'));
           if (name !== body.params.name) return Response.json({jsonrpc: '2.0', id: body.id ?? null,
             error: {code: -32020, message: 'Mcp-Name must match params.name'},
           }, {status: 400});
+          const station = body.params.arguments?.stationId;
+          const header = request.headers.get('Mcp-Param-Station');
+          if (station === undefined || station === null ? header !== null : decodeHeaderValue(header) !== station) {
+            return Response.json({jsonrpc: '2.0', id: body.id ?? null,
+              error: {code: -32020, message: 'Mcp-Param-Station must match arguments.stationId'},
+            }, {status: 400});
+          }
         }
         return handler.fetch(request, {parsedBody: body});
       }}, {maxRequestBodySize: 65_536});

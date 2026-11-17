@@ -1,3 +1,4 @@
+import {argumentHeaderDeclarations, argumentHeaders, type ArgumentHeader} from './argument-headers.ts';
 import {Ajv as AjvDraft7, type ValidateFunction} from 'ajv';
 import {Ajv2020} from 'ajv/dist/2020.js';
 import {Ajv2019} from 'ajv/dist/2019.js';
@@ -20,16 +21,20 @@ function compile(schema: EventDescriptor['inputSchema']): ValidateFunction {
 
 export class EventContract {
   readonly descriptor: EventDescriptor;
+  private readonly headers: ArgumentHeader[];
   private readonly input: ValidateFunction;
   private readonly payload: ValidateFunction;
-  constructor(descriptor: EventDescriptor) {
+  constructor(descriptor: EventDescriptor, httpHeaders = false) {
     this.descriptor = descriptor;
+    this.headers = httpHeaders ? argumentHeaderDeclarations(descriptor.inputSchema) : [];
     this.input = compile(descriptor.inputSchema);
     this.payload = compile(descriptor.payloadSchema);
   }
   arguments(value: Record<string, unknown>) {
     if (!this.input(value)) throw new Error('Subscription arguments do not match inputSchema');
+    this.argumentHeaders(value);
   }
+  argumentHeaders(value: unknown) { return argumentHeaders(this.headers, value); }
   event(value: EventOccurrence) {
     if (value.name !== this.descriptor.name) throw new Error('Event name does not match the subscription');
     if (!this.payload(value.data)) throw new Error('Event data does not match payloadSchema');

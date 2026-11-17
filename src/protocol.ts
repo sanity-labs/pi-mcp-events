@@ -2,7 +2,7 @@ import {z} from 'zod';
 import {createRequire} from 'node:module';
 import {ProtocolErrorCode} from '@modelcontextprotocol/client';
 
-// Pinned proposal: https://github.com/pja-ant/modelcontextprotocol/blob/4165cc2e580afa795842002f631edbbe17c63757/seps/3415-events-extension.md
+// Pinned proposal: https://github.com/pja-ant/modelcontextprotocol/blob/60b15c16f2e7265ea34ac51099dc5be62f734692/seps/3415-events-extension.md
 export const PROTOCOL_VERSION = '2026-07-28';
 export const EVENTS_EXTENSION = 'io.modelcontextprotocol/events';
 export const SUBSCRIPTION_ID = 'io.modelcontextprotocol/subscriptionId';
@@ -24,6 +24,7 @@ export const EventNotification = {
 } as const;
 export type EventNotification = typeof EventNotification[keyof typeof EventNotification];
 export const EventProtocolErrorCode = {
+  HeaderMismatch: -32020,
   MethodNotFound: ProtocolErrorCode.MethodNotFound,
   InvalidParams: ProtocolErrorCode.InvalidParams,
   InternalError: ProtocolErrorCode.InternalError,
