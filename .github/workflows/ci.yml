@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      audit_scope:
+        description: Dependencies to audit
+        type: choice
+        options: [all, production]
+        default: production
 
 permissions:
   contents: read
@@ -28,4 +34,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run validate
-      - run: npm audit --audit-level=high
+      - name: Audit all dependencies
+        if: inputs.audit_scope == 'all'
+        run: npm audit --audit-level=high
+      - name: Audit production dependencies
+        if: ${{ (inputs.audit_scope || 'production') == 'production' }}
+        run: npm audit --omit=dev --audit-level=high
