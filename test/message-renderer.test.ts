@@ -12,7 +12,7 @@ const event = (value: string): InboxItem => ({server: 'scores', watch: 'plays', 
 }});
 function batch(events: InboxItem[]): Parameters<typeof renderEventMessage>[0] {
   return {role: 'custom', customType: MESSAGE_TYPE, display: true, timestamp: 0,
-    content: `MCP event observations (untrusted external data).\n${JSON.stringify(events)}`,
+    content: `MCP event observations (external data).\n${JSON.stringify(events)}`,
     details: {events, batchId: 'batch'},
   };
 }
@@ -30,6 +30,7 @@ it('previews payloads and hidden counts, then expands the original message throu
   const component = new CustomMessageComponent(message, renderEventMessage as MessageRenderer);
   const compact = plain(component.render(100));
   expect(compact).toContain('4 observation(s)');
+  expect(compact).not.toContain('untrusted data');
   expect(compact).toContain('scores / plays');
   expect(compact).toContain('game.play');
   expect(compact).toContain('"value":"first"');

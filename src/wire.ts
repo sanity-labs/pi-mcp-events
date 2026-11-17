@@ -233,11 +233,13 @@ export class EventsWire {
       receive: message => {
         if (!accepting) return;
         const size = Buffer.byteLength(JSON.stringify(message));
-        if (++queued > 100 || (bytes += size) > 256 * 1024) {
+        if (queued >= 100 || bytes + size > 256 * 1024) {
+          disconnect(new Error('Event stream backlog exceeded its memory limit'));
           cancel();
-          end(new Error('Event stream backlog exceeded its memory limit'));
           return;
         }
+        queued++;
+        bytes += size;
         writes = writes.then(async () => {
           if (ended) return;
           if ('error' in message) throw new EventProtocolError(remoteError.parse(message.error));

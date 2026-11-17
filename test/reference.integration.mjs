@@ -31,6 +31,21 @@ async function setup(t, options) {
   return {server, client, wire, poll, setTime(value) { seconds = value; }};
 }
 
+test('weather reference: push recovers a 500-event replay backlog within its retry budget', {timeout: 20_000}, async t => {
+  const {server, client, poll} = await setup(t);
+  const {cursor} = await poll();
+  const expected = Array.from({length: 500}, () => server.advance()[0].eventId);
+  const received = [];
+  const watch = client.watch({name: 'weather.reading', arguments: {}, mode: 'push', cursor}, observation => {
+    if (observation.type === 'event') received.push(observation.event.eventId);
+  });
+  await watch.ready;
+  await until(() => received.length === expected.length);
+  assert.deepEqual(received, expected);
+  assert.equal(watch.status, 'active');
+  await watch.stop();
+});
+
 for (const persistent of [false, true]) {
   test(`weather reference: push drains a closed connection into ${persistent ? 'disk-backed' : 'in-memory'} state`, {timeout: 20_000}, async t => {
     const server = await startWeatherServer({port: 0, intervalMs: 0});
