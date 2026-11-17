@@ -19,7 +19,7 @@ export const catalog = Object.entries(payloads).map(([name, payload]) => ({
     'weather.changed': 'Condition changes, staggered between stations over several minutes.',
     'weather.alert': 'A storm warning is raised or cleared once per transition, with the current reading.',
   }[name],
-  delivery: ['poll', 'push'], inputSchema: z.toJSONSchema(subscriptionArguments), payloadSchema: z.toJSONSchema(payload),
+  delivery: ['poll', 'push', 'webhook'], inputSchema: z.toJSONSchema(subscriptionArguments), payloadSchema: z.toJSONSchema(payload),
 }));
 
 export function createWeather({now = Date.now} = {}) {
