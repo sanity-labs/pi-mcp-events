@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import {parseArgs} from 'node:util';
 import {pathToFileURL} from 'node:url';
 import {createMcpHandler, Server, ProtocolError, ProtocolErrorCode} from '@modelcontextprotocol/server';
+import {serveStdio, StdioServerTransport} from '@modelcontextprotocol/server/stdio';
 import {toNodeHandler, localhostHostValidation, localhostOriginValidation} from '@modelcontextprotocol/node';
 import {z} from 'zod';
 import {catalog, createWeather, payloads, subscriptionArguments} from './weather.mjs';
@@ -19,8 +20,10 @@ const watch = z.object({
   heartbeatMs: z.number().int().positive().optional(),
 });
 
-export async function startWeatherServer({port = 3015, intervalMs = 20_000, heartbeatMs = 1000, historyLimit = 1000, now = Date.now, onEvent = () => {},
+export async function startWeatherServer({transport = 'http', port = 3015, intervalMs = 20_000, heartbeatMs = 1000, historyLimit = 1000, now = Date.now, onEvent = () => {},
   webhookToken, webhookCa, webhookAllowedUrls = [], webhookAllowedOrigins = [], webhookDeliveryOptions = {}} = {}) {
+  if (!['http', 'stdio'].includes(transport)) throw new Error('Transport must be http or stdio');
+  const webhooksEnabled = transport === 'http' && Boolean(webhookToken);
   if (!Number.isInteger(intervalMs) || (intervalMs !== 0 && (intervalMs < 10_000 || intervalMs > 2_147_483_647))) throw new Error('Interval must be 0 or an integer between 10000 and 2147483647 ms');
   if (!Number.isInteger(heartbeatMs) || heartbeatMs < 1 || heartbeatMs > 30_000) throw new Error('Heartbeat must be an integer between 1 and 30000 ms');
   if (!Number.isInteger(historyLimit) || historyLimit < 1) throw new Error('History limit must be a positive integer');
@@ -65,7 +68,7 @@ export async function startWeatherServer({port = 3015, intervalMs = 20_000, hear
       });
     } catch (error) { throw new ProtocolError(ProtocolErrorCode.InvalidParams, error.message); }
   };
-  const handler = createMcpHandler(() => {
+  const createServerInstance = () => {
     const server = new Server({name: 'weather-reference', version: '0.0.0'}, {
       supportedProtocolVersions: [revision], capabilities: {extensions: {'io.modelcontextprotocol/events': {}}},
     });
@@ -73,51 +76,53 @@ export async function startWeatherServer({port = 3015, intervalMs = 20_000, hear
       if (params.cursor !== undefined) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'The weather catalog has one page');
       return {resultType: 'complete', events: catalog.map(event => ({
         ...event,
-        delivery: webhookToken ? event.delivery : event.delivery.filter(mode => mode !== 'webhook'),
+        delivery: webhooksEnabled ? event.delivery : event.delivery.filter(mode => mode !== 'webhook'),
       }))};
     });
     server.setRequestHandler('events/poll', {params: watch}, params => {
       const {events, cursor, truncated, hasMore} = read(params);
       return {resultType: 'complete', events, cursor, truncated, hasMore, nextPollMs: 1000};
     });
-    server.setRequestHandler('events/subscribe', {params: z.object({
-      name: z.string(), arguments: subscriptionArguments.default({}),
-      delivery: z.object({mode: z.literal('webhook'), url: z.string(), secret: z.string()}),
-      cursor: z.string().nullable().optional(), maxAgeMs: z.number().int().nonnegative().optional(),
-      ttlMs: z.number().int().nonnegative().nullable().optional(),
-    })}, async (params) => {
-      if (!Object.hasOwn(payloads, params.name)) throw new ProtocolError(-32023, 'Unknown weather event', {kind: 'event'});
-      let callbackUrl;
-      try { callbackUrl = new URL(params.delivery.url).toString(); }
-      catch { throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid webhook URL'); }
-      if ((webhookUrlAllowlist.size > 0 || webhookOriginAllowlist.size > 0)
-        && !webhookUrlAllowlist.has(callbackUrl) && !webhookOriginAllowlist.has(new URL(callbackUrl).origin)) {
-        throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Webhook URL is not in the configured test allowlist');
-      }
-      try {
-        return {resultType: 'complete', ...await webhookDelivery.subscribe({
-          principal: 'weather-reference-user', name: params.name, arguments: params.arguments,
-          url: params.delivery.url, secret: params.delivery.secret,
-          ttlMs: params.ttlMs === null ? undefined : params.ttlMs,
-          cursor: params.cursor, maxAgeMs: params.maxAgeMs,
-        })};
-      } catch (error) {
-        if (error instanceof WebhookCallbackError) throw new ProtocolError(-32027, error.message, {reason: error.reason});
-        if (error instanceof WebhookLimitError) throw new ProtocolError(-32025, error.message, {limit: 'subscriptions'});
-        throw new ProtocolError(ProtocolErrorCode.InvalidParams, error.message);
-      }
-    });
-    server.setRequestHandler('events/unsubscribe', {params: z.object({
-      name: z.string(), arguments: subscriptionArguments.default({}),
-      delivery: z.object({mode: z.literal('webhook').optional(), url: z.string()}),
-    })}, async params => {
-      if (!Object.hasOwn(payloads, params.name)) throw new ProtocolError(-32023, 'Unknown weather event', {kind: 'event'});
-      const removed = await webhookDelivery.unsubscribe({
-        principal: 'weather-reference-user', name: params.name, arguments: params.arguments, url: params.delivery.url,
+    if (webhooksEnabled) {
+      server.setRequestHandler('events/subscribe', {params: z.object({
+        name: z.string(), arguments: subscriptionArguments.default({}),
+        delivery: z.object({mode: z.literal('webhook'), url: z.string(), secret: z.string()}),
+        cursor: z.string().nullable().optional(), maxAgeMs: z.number().int().nonnegative().optional(),
+        ttlMs: z.number().int().nonnegative().nullable().optional(),
+      })}, async (params) => {
+        if (!Object.hasOwn(payloads, params.name)) throw new ProtocolError(-32023, 'Unknown weather event', {kind: 'event'});
+        let callbackUrl;
+        try { callbackUrl = new URL(params.delivery.url).toString(); }
+        catch { throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid webhook URL'); }
+        if ((webhookUrlAllowlist.size > 0 || webhookOriginAllowlist.size > 0)
+          && !webhookUrlAllowlist.has(callbackUrl) && !webhookOriginAllowlist.has(new URL(callbackUrl).origin)) {
+          throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Webhook URL is not in the configured test allowlist');
+        }
+        try {
+          return {resultType: 'complete', ...await webhookDelivery.subscribe({
+            principal: 'weather-reference-user', name: params.name, arguments: params.arguments,
+            url: params.delivery.url, secret: params.delivery.secret,
+            ttlMs: params.ttlMs === null ? undefined : params.ttlMs,
+            cursor: params.cursor, maxAgeMs: params.maxAgeMs,
+          })};
+        } catch (error) {
+          if (error instanceof WebhookCallbackError) throw new ProtocolError(-32027, error.message, {reason: error.reason});
+          if (error instanceof WebhookLimitError) throw new ProtocolError(-32025, error.message, {limit: 'subscriptions'});
+          throw new ProtocolError(ProtocolErrorCode.InvalidParams, error.message);
+        }
       });
-      if (!removed) throw new ProtocolError(-32023, 'Unknown weather subscription', {kind: 'subscription'});
-      return {resultType: 'complete'};
-    });
+      server.setRequestHandler('events/unsubscribe', {params: z.object({
+        name: z.string(), arguments: subscriptionArguments.default({}),
+        delivery: z.object({mode: z.literal('webhook').optional(), url: z.string()}),
+      })}, async params => {
+        if (!Object.hasOwn(payloads, params.name)) throw new ProtocolError(-32023, 'Unknown weather event', {kind: 'event'});
+        const removed = await webhookDelivery.unsubscribe({
+          principal: 'weather-reference-user', name: params.name, arguments: params.arguments, url: params.delivery.url,
+        });
+        if (!removed) throw new ProtocolError(-32023, 'Unknown weather subscription', {kind: 'subscription'});
+        return {resultType: 'complete'};
+      });
+    }
     server.setRequestHandler('events/stream', {params: watch}, async (params, ctx) => {
       const page = read({...params, maxEvents: historyLimit});
       const grantedHeartbeat = Math.min(params.heartbeatMs ?? heartbeatMs, heartbeatMs);
@@ -161,7 +166,7 @@ export async function startWeatherServer({port = 3015, intervalMs = 20_000, hear
       return {resultType: 'complete', _meta: meta};
     });
     return server;
-  }, {legacy: 'reject', maxRequestBodySize: 65_536});
+  };
   const emit = events => events.map(({name, data}) => {
     const event = log.append(name, payloads[name].parse(data));
     onEvent(event);
@@ -170,64 +175,6 @@ export async function startWeatherServer({port = 3015, intervalMs = 20_000, hear
     return event;
   });
   const advance = () => emit([...weather.advance(), ...weather.alerts()]);
-  // The SDK checks core routing headers; the draft adds Mcp-Name to Events methods.
-  const mcp = toNodeHandler({fetch: async request => {
-    let body;
-    if (request.method === 'POST') {
-      try { body = await request.clone().json(); }
-      catch { return handler.fetch(request); }
-    }
-    if (['events/subscribe', 'events/unsubscribe'].includes(body?.method)) {
-      if (!webhookToken) return Response.json({jsonrpc: '2.0', id: body.id ?? null,
-        error: {code: -32601, message: 'Method not found'},
-      }, {status: 200});
-      const authorization = request.headers.get('authorization') ?? '';
-      const supplied = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
-      const expected = webhookToken ?? '';
-      const suppliedBytes = Buffer.from(supplied);
-      const expectedBytes = Buffer.from(expected);
-      const authenticated = expectedBytes.length > 0 && suppliedBytes.length === expectedBytes.length
-        && timingSafeEqual(suppliedBytes, expectedBytes);
-      if (!authenticated) return Response.json({jsonrpc: '2.0', id: body.id ?? null,
-        error: {code: -32024, message: 'Authenticated principal required'},
-      }, {status: 200});
-    }
-    if (['events/poll', 'events/stream', 'events/subscribe', 'events/unsubscribe'].includes(body?.method) && typeof body.params?.name === 'string') {
-      const header = request.headers.get('Mcp-Name');
-      let name = header;
-      if (header?.startsWith('=?base64?') && header.endsWith('?=')) {
-        const encoded = header.slice(9, -2);
-        const decoded = Buffer.from(encoded, 'base64');
-        name = decoded.toString('base64') === encoded ? decoded.toString('utf8') : null;
-      }
-      if (name !== body.params.name) return Response.json({jsonrpc: '2.0', id: body.id ?? null,
-        error: {code: -32020, message: 'Mcp-Name must match params.name'},
-      }, {status: 400});
-    }
-    return handler.fetch(request, {parsedBody: body});
-  }}, {maxRequestBodySize: 65_536});
-  const hostAllowed = localhostHostValidation();
-  const originAllowed = localhostOriginValidation();
-  let closing = false;
-  const http = createServer((request, response) => {
-    if (closing) { response.writeHead(503); response.end(); return; }
-    if (!hostAllowed(request, response) || !originAllowed(request, response)) return;
-    if (request.url === '/mcp') {
-      void mcp(request, response).catch(() => { response.writeHead(500); response.end(); });
-      return;
-    }
-    if (request.url === '/advance' && request.method === 'POST'
-      && request.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() === 'application/json') {
-      request.resume();
-      response.writeHead(200, {'content-type': 'application/json'});
-      response.end(JSON.stringify(advance()));
-      return;
-    }
-    response.writeHead(404); response.end();
-  });
-  try {
-    await new Promise((resolve, reject) => { http.once('error', reject); http.listen(port, '127.0.0.1', resolve); });
-  } catch (error) { await handler.close(); throw error; }
   let timer;
   let alertTimer;
   const scheduleAlerts = (delayMs = 45_000) => {
@@ -243,41 +190,126 @@ export async function startWeatherServer({port = 3015, intervalMs = 20_000, hear
       schedule();
     }, randomInt(10_000, intervalMs + 1));
   };
-  if (intervalMs > 0) { schedule(); scheduleAlerts(20_000); }
-  return {
-    url: `http://127.0.0.1:${http.address().port}/mcp`, advance,
-    waitForWebhookIdle: () => webhookDelivery.waitForIdle(),
-    async close() {
-      closing = true;
-      clearTimeout(timer);
-      clearTimeout(alertTimer);
-      webhookDelivery.close();
+  let handler;
+  let http;
+  let closing = false;
+  let closed;
+  const close = () => {
+    if (closed) return closed;
+    closing = true;
+    clearTimeout(timer);
+    clearTimeout(alertTimer);
+    webhookDelivery.close();
+    closed = (async () => {
       await webhookDelivery.waitForIdle();
-      await handler.close();
-      http.closeAllConnections();
-      await new Promise((resolve, reject) => http.close(error => error ? reject(error) : resolve()));
-    },
+      await handler?.close();
+      if (transport === 'stdio') process.stdin.destroy();
+      if (http?.listening) {
+        http.closeAllConnections();
+        await new Promise((resolve, reject) => http.close(error => error ? reject(error) : resolve()));
+      }
+    })();
+    return closed;
+  };
+  try {
+    if (transport === 'stdio') {
+      const stdio = new StdioServerTransport(process.stdin, process.stdout, {maxBufferSize: 65_536});
+      handler = serveStdio(createServerInstance, {legacy: 'reject', transport: stdio});
+      const onclose = stdio.onclose;
+      stdio.onclose = () => {
+        onclose?.();
+        void close().catch(error => { console.error(error); process.exitCode = 1; });
+      };
+    } else {
+      handler = createMcpHandler(createServerInstance, {legacy: 'reject', maxRequestBodySize: 65_536});
+      // The SDK checks core routing headers; the draft adds Mcp-Name to Events methods.
+      const mcp = toNodeHandler({fetch: async request => {
+        let body;
+        if (request.method === 'POST') {
+          try { body = await request.clone().json(); }
+          catch { return handler.fetch(request); }
+        }
+        if (['events/subscribe', 'events/unsubscribe'].includes(body?.method)) {
+          if (!webhookToken) return Response.json({jsonrpc: '2.0', id: body.id ?? null,
+            error: {code: -32601, message: 'Method not found'},
+          }, {status: 200});
+          const authorization = request.headers.get('authorization') ?? '';
+          const supplied = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+          const expected = webhookToken ?? '';
+          const suppliedBytes = Buffer.from(supplied);
+          const expectedBytes = Buffer.from(expected);
+          const authenticated = expectedBytes.length > 0 && suppliedBytes.length === expectedBytes.length
+            && timingSafeEqual(suppliedBytes, expectedBytes);
+          if (!authenticated) return Response.json({jsonrpc: '2.0', id: body.id ?? null,
+            error: {code: -32024, message: 'Authenticated principal required'},
+          }, {status: 200});
+        }
+        if (['events/poll', 'events/stream', 'events/subscribe', 'events/unsubscribe'].includes(body?.method) && typeof body.params?.name === 'string') {
+          const header = request.headers.get('Mcp-Name');
+          let name = header;
+          if (header?.startsWith('=?base64?') && header.endsWith('?=')) {
+            const encoded = header.slice(9, -2);
+            const decoded = Buffer.from(encoded, 'base64');
+            name = decoded.toString('base64') === encoded ? decoded.toString('utf8') : null;
+          }
+          if (name !== body.params.name) return Response.json({jsonrpc: '2.0', id: body.id ?? null,
+            error: {code: -32020, message: 'Mcp-Name must match params.name'},
+          }, {status: 400});
+        }
+        return handler.fetch(request, {parsedBody: body});
+      }}, {maxRequestBodySize: 65_536});
+      const hostAllowed = localhostHostValidation();
+      const originAllowed = localhostOriginValidation();
+      http = createServer((request, response) => {
+        if (closing) { response.writeHead(503); response.end(); return; }
+        if (!hostAllowed(request, response) || !originAllowed(request, response)) return;
+        if (request.url === '/mcp') {
+          void mcp(request, response).catch(() => { response.writeHead(500); response.end(); });
+          return;
+        }
+        if (request.url === '/advance' && request.method === 'POST'
+          && request.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() === 'application/json') {
+          request.resume();
+          response.writeHead(200, {'content-type': 'application/json'});
+          response.end(JSON.stringify(advance()));
+          return;
+        }
+        response.writeHead(404); response.end();
+      });
+      await new Promise((resolve, reject) => { http.once('error', reject); http.listen(port, '127.0.0.1', resolve); });
+    }
+  } catch (error) {
+    await close();
+    throw error;
+  }
+  if (!closing && intervalMs > 0) { schedule(); scheduleAlerts(20_000); }
+  return {
+    url: http ? `http://127.0.0.1:${http.address().port}/mcp` : undefined, advance,
+    waitForWebhookIdle: () => webhookDelivery.waitForIdle(), close,
   };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const {values} = parseArgs({options: {port: {type: 'string', default: '3015'}, interval: {type: 'string', default: '20000'}}});
-  const webhookCa = process.env.WEATHER_WEBHOOK_CA ? readFileSync(process.env.WEATHER_WEBHOOK_CA) : undefined;
-  const webhookAllowedOrigins = process.env.WEATHER_WEBHOOK_LOCAL_ORIGIN ? [process.env.WEATHER_WEBHOOK_LOCAL_ORIGIN] : [];
-  const server = await startWeatherServer({port: Number(values.port), intervalMs: Number(values.interval),
-    webhookToken: process.env.WEATHER_WEBHOOK_TOKEN, webhookCa, webhookAllowedOrigins,
+  const {values} = parseArgs({options: {transport: {type: 'string', default: 'http'}, port: {type: 'string', default: '3015'}, interval: {type: 'string', default: '20000'}}});
+  const webhookCa = values.transport === 'http' && process.env.WEATHER_WEBHOOK_CA ? readFileSync(process.env.WEATHER_WEBHOOK_CA) : undefined;
+  const webhookAllowedOrigins = values.transport === 'http' && process.env.WEATHER_WEBHOOK_LOCAL_ORIGIN ? [process.env.WEATHER_WEBHOOK_LOCAL_ORIGIN] : [];
+  const log = values.transport === 'stdio' ? console.error : console.log;
+  const server = await startWeatherServer({transport: values.transport, port: Number(values.port), intervalMs: Number(values.interval),
+    webhookToken: values.transport === 'http' ? process.env.WEATHER_WEBHOOK_TOKEN : undefined, webhookCa, webhookAllowedOrigins,
     onEvent: event => {
       const {station, condition, temperatureC, windKph, rainfallMmPerHour, daylight, status, message, previousCondition} = event.data;
       let description = condition;
       if (previousCondition) description = `${previousCondition} → ${condition}`;
       if (status) description = `${status.toUpperCase()}: ${message}`;
-      console.log(`\n${event.timestamp.slice(11, 19)}Z  ${station}  ${event.name}`);
-      console.log(`  ${description}  |  ${daylight ? 'day' : 'night'}`);
-      console.log(`  ${temperatureC} °C  |  wind ${windKph} km/h  |  rain ${rainfallMmPerHour} mm/h`);
-      console.log(`  id: ${event.eventId}`);
+      log(`\n${event.timestamp.slice(11, 19)}Z  ${station}  ${event.name}`);
+      log(`  ${description}  |  ${daylight ? 'day' : 'night'}`);
+      log(`  ${temperatureC} °C  |  wind ${windKph} km/h  |  rain ${rainfallMmPerHour} mm/h`);
+      log(`  id: ${event.eventId}`);
     },
   });
-  const cadence = Number(values.interval) === 0 ? 'POST /advance for the next reading.' : `Bursts of 1–3 readings, 10000–${values.interval} ms apart. Alerts every 45 seconds, starting after 20 seconds.`;
-  console.log(`Island weather station: ${server.url}\n${cadence} Weather changes over minutes. Ctrl-C to stop.`);
+  let cadence = 'Automatic readings disabled.';
+  if (values.transport === 'http') cadence = 'POST /advance for the next reading.';
+  if (Number(values.interval) !== 0) cadence = `Bursts of 1–3 readings, 10000–${values.interval} ms apart. Alerts every 45 seconds, starting after 20 seconds.`;
+  log(`Island weather station: ${server.url ?? 'stdio'}\n${cadence} Weather changes over minutes. Ctrl-C to stop.`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void server.close().catch(error => { console.error(error); process.exitCode = 1; }); });
 }

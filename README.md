@@ -102,6 +102,23 @@ After reload completes, check the watches with a separate command:
 
 All three support `poll` and `push`, with optional `"arguments": {"stationId": "harbor"}` or `"arguments": {"stationId": "hilltop"}` to follow one station. Change the configuration and `/reload` to try another event or mode. Replay keeps the last 1,000 events in memory; stale or pre-restart cursors report a gap.
 
+### Run the demo over stdio
+
+Pi can start the weather server as a local process. Replace the `weather` entry under `servers` with:
+
+```json
+{
+  "transport": "stdio",
+  "command": "node",
+  "args": ["dev/weather-server.mjs", "--transport", "stdio"],
+  "cwd": "/absolute/path/to/pi-mcp-events"
+}
+```
+
+Set `cwd` to your checkout's absolute path. Keep the same watches and presenter prompt, then run `/reload`. Pi starts and stops its own weather process; no separate server terminal or HTTP port is needed. Poll and push use the same weather timeline, station filters, and in-memory replay as the HTTP demo. Restarting the process loses its history; retained cursors report a gap.
+
+HTTP remains the default for `npm run dev:weather`. The webhook walkthrough below uses HTTP.
+
 ### Try local webhook delivery
 
 The weather server can also send signed webhooks to Pi over local HTTPS. Stop the server from the earlier demo with Ctrl-C first: the webhook demo starts its own server on port 3015 with webhook delivery enabled.
