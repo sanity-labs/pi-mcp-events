@@ -107,6 +107,33 @@ describe('MCP wire adapter in isolation', () => {
     expect(received).toHaveBeenCalledOnce();
   });
 
+  it.each(['messages', 'bytes'])('drains accepted notifications after exceeding the queued %s limit', async limit => {
+    const transport = new TestTransport();
+    const wire = new EventsWire(transport);
+    cleanups.push(() => wire.close());
+    await wire.connect();
+    const gate = Promise.withResolvers<void>();
+    cleanups.push(async () => { gate.resolve(); });
+    const received: number[] = [];
+    transport.handle = (request, options) => {
+      options?.requestSignal?.addEventListener('abort', () => options.onRequestStreamEnd?.(), {once: true});
+      const data = limit === 'bytes' ? 'x'.repeat(90_000) : '';
+      for (let index = 0; index < 101; index++) transport.notify(request, 'event', {index, data});
+    };
+    const stream = wire.stream('events/stream', {name: 'example.changed'}, new AbortController().signal, async (_method, params) => {
+      await gate.promise;
+      received.push(Number(params.index));
+    });
+    let finished = false;
+    const closed = expect(stream).rejects.toThrow('Event stream backlog exceeded its memory limit');
+    void stream.finally(() => { finished = true; }).catch(() => {});
+    await vi.waitFor(() => expect(transport.messages.some(({message}) => 'method' in message && message.method === 'notifications/cancelled')).toBe(true));
+    expect(finished).toBe(false);
+    gate.resolve();
+    await closed;
+    expect(received).toEqual(Array.from({length: limit === 'messages' ? 100 : 2}, (_, index) => index));
+  });
+
   it('correlates concurrent streams and cancels only the aborted request', async () => {
     const transport = new TestTransport();
     const wire = new EventsWire(transport);

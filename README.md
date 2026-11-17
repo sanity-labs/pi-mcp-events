@@ -2,11 +2,7 @@
 
 An implementation of the **accepted MCP Events proposal, [SEP-3415 pinned at `4165cc2`](https://github.com/pja-ant/modelcontextprotocol/blob/4165cc2e580afa795842002f631edbbe17c63757/seps/3415-events-extension.md)**, for [Pi](https://pi.dev). Targets MCP revision `2026-07-28`; the proposal is still open and may change before it is final. Receive events through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it's ready for a follow-up turn.
 
-Read the story behind this extension on the Sanity engineering blog: [The dream of real-time MCP (and what stands in the way)](https://www.sanity.io/engineering/the-dream-of-real-time-mcp?utm_source=github&utm_medium=readme&utm_campaign=pi-mcp-events). It covers why agents that work alongside people need streamed events, what we measured with webhook delivery, and the gaps we found in the draft spec along the way.
-
-## Demo
-
-https://github.com/user-attachments/assets/5eccbf3b-01a5-46a6-a6b4-12388bc7d0d3
+Read [The dream of real-time MCP (and what stands in the way)](https://www.sanity.io/engineering/the-dream-of-real-time-mcp?utm_source=github&utm_medium=readme&utm_campaign=pi-mcp-events) on the Sanity engineering blog for the product drivers behind this extension, and what we learned along the way. [Watch the demo video (MP4)](https://cdn.sanity.io/media-libraries/al34RQcBfuD7/videos/7ef17ab43f3386c047e687ad54d3ba978df099c6.mp4).
 
 ## Requirements
 
@@ -108,7 +104,9 @@ All three support `poll` and `push`, with optional `"arguments": {"stationId": "
 
 ### Try local webhook delivery
 
-The weather server can also send signed webhooks to Pi over local HTTPS. From the checkout, run the following in one shell. It creates a temporary certificate and token, starts the server, and opens Pi with a webhook watch:
+The weather server can also send signed webhooks to Pi over local HTTPS. Stop the server from the earlier demo with Ctrl-C first: the webhook demo starts its own server on port 3015 with webhook delivery enabled.
+
+From the checkout, run the following in one shell. It creates a temporary certificate and token, starts the server, and opens Pi with a webhook watch:
 
 ```sh
 weather_dir=$(mktemp -d)
@@ -150,10 +148,7 @@ Create `.pi/mcp-events.json` in the project where you run Pi:
   "servers": {
     "example": {
       "transport": "http",
-      "url": "https://events.example.com/mcp",
-      "headers": {
-        "Authorization": {"env": "EVENTS_TOKEN", "prefix": "Bearer "}
-      }
+      "url": "https://events.example.com/mcp"
     }
   },
   "watches": [
@@ -168,7 +163,7 @@ Create `.pi/mcp-events.json` in the project where you run Pi:
 }
 ```
 
-Replace the example URL, event name, and arguments with values from your MCP server's Events catalog. The server must support era `2026-07-28`, advertise the Events extension, and support the chosen delivery mode. Supply `EVENTS_TOKEN` through your environment, then start Pi and run `/mcp-events status`. When the server emits a matching event, Pi displays it in the conversation and schedules a follow-up turn. Event content is presented as untrusted data: it does not grant permission to take actions.
+Replace the example URL, event name, and arguments with values from your MCP server's Events catalog. The server must support era `2026-07-28`, advertise the Events extension, and support the chosen delivery mode. Start Pi and run `/mcp-events status`. When the server emits a matching event, Pi displays it in the conversation and schedules a follow-up turn. Event payloads are external data. Pi can respond using your existing instructions and permissions; instructions inside payloads do not change them.
 
 ### Configuring events subscriptions
 
@@ -200,15 +195,14 @@ Each watch needs
 
 Schemas can be JSON Schema objects or booleans. If this client cannot use an event's schemas, that event is unavailable; other events remain usable. `/mcp-events status` lists unavailable event types. After the server repairs a schema, use `/mcp-events start <watchId>` to retry the affected watch.
 
-HTTP servers support headers supplied directly or through `{ "env": "VARIABLE", "prefix": "optional prefix" }`. For a local MCP process, a server entry looks like this:
+For a local MCP process, a server entry looks like this:
 
 ```json
 {
   "transport": "stdio",
   "command": "node",
   "args": ["./server.mjs"],
-  "cwd": "..",
-  "env": {"API_TOKEN": {"env": "EVENTS_TOKEN"}}
+  "cwd": ".."
 }
 ```
 
@@ -313,7 +307,7 @@ Event payloads become part of Pi's conversation and may be sent to the configure
 
 ## Compatibility and development
 
-The package pins its own MCP client dependency and does not require the host to upgrade its MCP SDK. Stock Pi 1.4.0 is the tested host.
+The package pins its own MCP client dependency and does not require the host to upgrade its MCP SDK. Stock Pi 1.5.2 is the tested host.
 
 >Wildcard peer dependencies are not a claim that every Pi version is qualified: YMMV.
 

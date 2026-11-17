@@ -33,7 +33,7 @@ export const renderEventMessage: MessageRenderer<PiEventBatch> = (message, {expa
     box.addChild(new Text(stripTerminalSequences(content), 0, 0));
     return component;
   }
-  const lines = [theme.fg('customMessageLabel', `MCP Events · ${events.length} observation(s) · untrusted data`)];
+  const lines = [theme.fg('customMessageLabel', `MCP Events · ${events.length} observation(s)`)];
   const warnings = new Map<string, number>();
   for (const {observation} of events) {
     const kind = warning(observation);

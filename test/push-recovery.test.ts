@@ -47,6 +47,30 @@ async function setup(settings: ClientOptions = {}) {
   };
 }
 
+it('drains bounded replay batches and reconnects until a large backlog is delivered', async () => {
+  const s = await setup({maxRetries: 10, heartbeatMs: 10_000});
+  const accepted: string[] = [];
+  s.onStream(stream => {
+    const cursor = stream.request.params?.cursor;
+    const after = cursor === 'saved' ? 0 : Number(cursor);
+    notify(stream, 'active', {cursor: String(cursor), truncated: false});
+    for (let position = after + 1; position <= 500; position++) {
+      notify(stream, 'event', event(String(position)));
+    }
+  });
+  const watch = s.client.watch(options, observation => {
+    if (observation.type === 'event') accepted.push(observation.event.eventId);
+  });
+  await flush();
+  for (let attempt = 0; attempt < 10 && accepted.length < 500; attempt++) {
+    await vi.advanceTimersByTimeAsync(100);
+  }
+  expect(accepted).toEqual(Array.from({length: 500}, (_, index) => String(index + 1)));
+  expect(watch.cursor).toBe('500');
+  expect(watch.status).toBe('active');
+  expect(s.streams.map(stream => stream.request.params?.cursor)).toEqual(['saved', '99', '198', '297', '396', '495']);
+});
+
 it.each([
   {persistent: false, replay: false}, {persistent: true, replay: false},
   {persistent: false, replay: true}, {persistent: true, replay: true},
