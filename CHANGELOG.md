@@ -1,5 +1,15 @@
 # @sanity-labs/pi-mcp-events
 
+## 0.1.3
+
+### Patch Changes
+
+- 3457f71: Support HTTP routing headers for event arguments annotated with `x-mcp-header`, including catalog refresh and retry when headers change.
+- 03ed536: Fix push subscriptions stopping before a large replay backlog has been delivered.
+  
+  Simplify event cards and clarify that agents can respond using existing instructions and permissions.
+- de81c54: Add a stdio option to the weather demo, with poll and push delivery.
+
 ## 0.1.2
 
 ### Patch Changes
