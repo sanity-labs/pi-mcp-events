@@ -105,5 +105,10 @@ it('uses the configured expansion shortcut', () => {
 it('lets Pi use its default renderer for messages without batch metadata', () => {
   const message = batch([]);
   delete message.details;
-  expect(renderEventMessage(message, {expanded: false, outputPad: 1}, {} as Theme)).toBeUndefined();
+  expect(renderEventMessage(message, {
+    expanded: false,
+    outputPad: 1,
+    keyText: () => '',
+    keyHint: () => '',
+  }, {} as Theme)).toBeUndefined();
 });

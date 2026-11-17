@@ -97,10 +97,14 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, cat
     await rpc.prompt('HOLD_TEST', undefined, 'followUp');
     await until(() => existsSync(contexts) && readFileSync(contexts, 'utf8').slice(before).includes('HOLD_TEST'), 'held model call');
   };
-  const shutdown = async () => {
-    await rpc.prompt('/test-shutdown');
+  const shutdown = async ({busy = false} = {}) => {
+    if (busy) {
+      await rpc.stop(); rpc = undefined;
+    } else {
+      await rpc.prompt('/test-shutdown');
+    }
     await until(() => fixture.stats().streams === 0 && fixture.stats().webhooks === 0, 'shutdown removes subscriptions');
-    await rpc.stop(); rpc = undefined;
+    if (rpc) { await rpc.stop(); rpc = undefined; }
     const count = fixture.requests.filter(r => r.method === 'events/poll').length;
     await delay(1100);
     assert.equal(fixture.requests.filter(r => r.method === 'events/poll').length, count, 'polling stops');
@@ -415,7 +419,7 @@ test('saved Pi session restores cursors and pending events after resume', {timeo
   assert.equal(batches(await rpc.getMessages()).length, 0, 'accepted batch remains queued while busy');
   const sessionFile = (await rpc.getState()).sessionFile; assert.ok(sessionFile);
   assert.ok(Object.keys(files(h.stateDir)).length > 0, 'Pi agent directory holds event state');
-  await h.shutdown(); await h.emit(11);
+  await h.shutdown({busy: true}); await h.emit(11);
   writeFileSync(h.release, 'continue'); rpc = await h.start(sessionFile);
   await h.received(10);
   await until(async () => {
