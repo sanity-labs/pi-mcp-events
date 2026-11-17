@@ -106,6 +106,35 @@ After reload completes, check the watches with a separate command:
 
 All three support `poll` and `push`, with optional `"arguments": {"stationId": "harbor"}` or `"arguments": {"stationId": "hilltop"}` to follow one station. Change the configuration and `/reload` to try another event or mode. Replay keeps the last 1,000 events in memory; stale or pre-restart cursors report a gap.
 
+### Try local webhook delivery
+
+The weather server can also send signed webhooks to Pi over local HTTPS. From the checkout, run the following in one shell. It creates a temporary certificate and token, starts the server, and opens Pi with a webhook watch:
+
+```sh
+weather_dir=$(mktemp -d)
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout "$weather_dir/key.pem" -out "$weather_dir/cert.pem" \
+  -subj '/CN=127.0.0.1' -addext 'subjectAltName=IP:127.0.0.1'
+export WEATHER_WEBHOOK_TOKEN="$(openssl rand -hex 32)"
+export WEATHER_WEBHOOK_CA="$weather_dir/cert.pem"
+export WEATHER_WEBHOOK_LOCAL_ORIGIN='https://127.0.0.1:18081'
+node dev/weather-server.mjs &
+weather_pid=$!
+mkdir -p "$weather_dir/.pi"
+cat > "$weather_dir/.pi/mcp-events.json" <<JSON
+{
+  "servers": {"weather": {"transport": "http", "url": "http://127.0.0.1:3015/mcp", "headers": {"Authorization": {"env": "WEATHER_WEBHOOK_TOKEN", "prefix": "Bearer "}}}},
+  "webhook": {"publicUrl": "https://127.0.0.1:18081/hooks", "host": "127.0.0.1", "port": 18081, "keyFile": "$weather_dir/key.pem", "certFile": "$weather_dir/cert.pem"},
+  "watches": [{"id": "alerts", "server": "weather", "name": "weather.alert", "mode": "webhook"}]
+}
+JSON
+(cd "$weather_dir" && pi)
+kill "$weather_pid"
+rm -rf "$weather_dir"
+```
+
+The server accepts webhook subscriptions only with the token. The loopback callback and its certificate are explicitly trusted for this demo. Subscriptions and weather history live in memory, and the server grants finite lifetimes; restarting can produce a replay gap.
+
 To trigger events yourself, start with `npm run dev:weather -- --interval 0`, then advance one reading at a time, alternating Harbor and Hilltop:
 
 ```sh
