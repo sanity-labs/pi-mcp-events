@@ -1,5 +1,15 @@
 # @sanity-labs/pi-mcp-events
 
+## 0.2.0
+
+### Minor Changes
+
+- 8c00b77: Start, list, change, and stop event watches in a Pi conversation. Saved sessions restore watches and resume progress. Time-bound watches stop at expiry and attempt bounded catch-up after a disconnect, with warnings when events may be missing.
+
+### Patch Changes
+
+- dc6731a: Keep conversational changes and stops for declared watches when a saved Pi session reloads or resumes. Update watch expiry without restarting its subscription, report conflicting durations on duplicate starts, and make room for new watches by removing old stopped history.
+
 ## 0.1.3
 
 ### Patch Changes
