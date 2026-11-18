@@ -18,7 +18,7 @@ import {EventsWire} from './wire.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 type SessionWatch = Pick<WatchOptions, 'name' | 'mode'> & {
-  server: string; options: WatchOptions; definition?: WatchDefinition; timer?: NodeJS.Timeout; accepting?: boolean; stopped?: boolean; warning?: string; watch?: Watch; start?: () => Promise<void>; starting?: Promise<void>;
+  server: string; options: WatchOptions; definition?: WatchDefinition; armExpiry?: () => void; timer?: NodeJS.Timeout; accepting?: boolean; stopped?: boolean; warning?: string; watch?: Watch; start?: () => Promise<void>; starting?: Promise<void>;
   failure?: 'connection failed' | 'could not start' | 'unsupported schema' | 'failed';
   diagnostic?: string; sourceDiagnostic?: string; webhookDiagnostic?: string;
 };
@@ -27,7 +27,7 @@ type ActiveSession = {
   stopping?: Promise<void>;
   discover?: (server?: string) => Promise<unknown>;
   create?: (input: {server: string; name: string; arguments: Record<string, unknown>; mode?: WatchOptions['mode']; expiresAt?: number; durationMs?: number}, replacing?: string) => Promise<unknown>;
-  stopWatch?: (id: string) => Promise<void>;
+  stopWatch?: (id: string, persistOverride?: boolean) => Promise<void>;
   state?: SessionState; delivery?: ConversationDelivery; receiver?: WebhookReceiver; path?: string;
 };
 
@@ -39,13 +39,13 @@ function preferredMode(event: EventDescriptor, webhook: boolean): WatchOptions['
   throw new WatchRequestError('This event requires a configured webhook receiver.');
 }
 function watchLifetime(entry: SessionWatch, state: SessionState) {
-  if (!entry.definition) return 'configured; restarts on reload';
+  if (!entry.definition) return 'project default; session changes override it';
   const lifetime = state.mode === 'persistent' ? 'saved session; restores on reload or resume' : 'memory only; ends on reload, session change, or exit';
   return entry.definition.expiresAt === undefined ? lifetime : `${lifetime}; expires ${new Date(entry.definition.expiresAt).toISOString()}`;
 }
 function describeWatch(id: string, entry: SessionWatch, state: SessionState) {
   return {id, server: entry.server, name: entry.name, arguments: entry.options.arguments, mode: entry.mode,
-    source: entry.definition ? 'conversation' : 'config', lifetime: watchLifetime(entry, state),
+    source: entry.definition ? 'conversation' : 'config', configuredId: entry.definition?.configuredId, lifetime: watchLifetime(entry, state),
     expiresAt: entry.definition?.expiresAt, phase: entry.definition?.phase,
     status: entry.starting ? 'starting' : entry.failure ?? entry.watch?.status ?? 'stopped',
     pending: state.snapshot().filter(item => item.watch === id).length,
@@ -134,19 +134,50 @@ export default function mcpEvents(pi: ExtensionAPI) {
       const isRunning = (entry: SessionWatch) => entry.starting || (entry.watch && entry.watch.status !== 'stopped');
       const duplicate = (value: WatchOptions & {server: string}) => [...session.watches].find(([, entry]) =>
         isRunning(entry) && subscriptionKey({...entry.options, server: entry.server}) === subscriptionKey(value));
-      const save = (entry: SessionWatch) => { if (entry.definition) state.saveWatch(entry.definition); };
+      const pruneHistory = () => {
+        const retained = new Set(state.watches.map(watch => watch.id));
+        let removed = false;
+        for (const [id, entry] of session.watches) {
+          if (entry.definition && !retained.has(entry.definition.id) && !isRunning(entry)) {
+            clearTimeout(entry.timer);
+            session.watches.delete(id);
+            removed = true;
+          }
+        }
+        if (removed) {
+          const keys = [...session.watches].map(([id, entry]) => identity({...entry.options, id, server: entry.server}));
+          state.retainCursors(keys);
+          state.retainWebhookIdentities(keys);
+        }
+      };
+      const save = (entry: SessionWatch, override = false) => {
+        if (entry.definition) state.saveWatch(entry.definition, override ? entry.definition.configuredId : undefined, historyCapacity());
+        pruneHistory();
+      };
+      const historyCapacity = () => 512 - [...session.watches.values()].filter(entry => !entry.definition).length;
+      const define = (id: string, entry: SessionWatch) => {
+        entry.definition ??= watchDefinition.parse({...entry.options, id, server: entry.server, configuredId: id, phase: 'active'});
+        return entry.definition;
+      };
+      const currentOverride = (entry?: SessionWatch) => {
+        const id = entry?.definition?.configuredId;
+        const overrides = state.configuredOverrides;
+        return id !== undefined && Object.hasOwn(overrides, id) ? overrides[id] : undefined;
+      };
       const warn = (entry: SessionWatch, text: string) => {
         entry.warning = text;
         if (entry.definition) { entry.definition.warning = text; save(entry); }
         report(text);
       };
-      session.stopWatch = async id => {
+      session.stopWatch = async (id, persistOverride = true) => {
         const entry = session.watches.get(id);
         if (!entry) throw new WatchRequestError('Unknown watch ID. List watches first.');
         entry.accepting = false;
         entry.stopped = true;
         clearTimeout(entry.timer);
-        if (entry.definition) { entry.definition.phase = 'stopped'; save(entry); }
+        define(id, entry).phase = 'stopped';
+        const current = currentOverride(entry);
+        save(entry, persistOverride && (current === undefined || current === id));
         await entry.watch?.stop();
         await entry.starting;
         await entry.watch?.stop();
@@ -156,18 +187,18 @@ export default function mcpEvents(pi: ExtensionAPI) {
         const key = identity(configured);
         const entry: SessionWatch = {server: configured.server, name: configured.name, mode: configured.mode, options: configured, definition, warning: definition?.warning};
         session.watches.set(configured.id, entry);
-        const expired = () => definition?.expiresAt !== undefined && Date.now() >= definition.expiresAt;
+        const expired = () => entry.definition?.expiresAt !== undefined && Date.now() >= entry.definition.expiresAt;
         const expire = async () => {
-          if (session.closed || definition?.phase !== 'active') return;
+          if (session.closed || entry.definition?.phase !== 'active') return;
           entry.accepting = false;
           await entry.watch?.stop();
-          if (session.closed || definition.phase !== 'active') return;
+          if (session.closed || entry.definition.phase !== 'active') return;
           await entry.start!();
         };
         const armExpiry = () => {
           clearTimeout(entry.timer);
-          if (definition?.expiresAt === undefined || definition.phase !== 'active') return;
-          const remaining = definition.expiresAt - Date.now();
+          if (entry.definition?.expiresAt === undefined || entry.definition.phase !== 'active') return;
+          const remaining = entry.definition.expiresAt - Date.now();
           entry.timer = setTimeout(() => {
             if (expired()) void expire().catch(() => warn(entry, `MCP Events watch "${configured.id}" could not finish expiry catch-up. Events may have been missed.`));
             else armExpiry();
@@ -183,9 +214,9 @@ export default function mcpEvents(pi: ExtensionAPI) {
             warn(entry, `MCP Events watch "${configured.id}" conflicts with running watch "${conflict[0]}". Only the existing watch is running.`);
             return;
           }
-          const catchingUp = expired() && definition?.phase !== 'stopped';
-          if (definition?.phase === 'catching-up') warn(entry, `MCP Events watch "${configured.id}" is resuming interrupted catch-up. Events may have been missed or repeated.`);
-          if (catchingUp && definition) { definition.phase = 'catching-up'; save(entry); }
+          const catchingUp = expired() && entry.definition?.phase !== 'stopped';
+          if (entry.definition?.phase === 'catching-up') warn(entry, `MCP Events watch "${configured.id}" is resuming interrupted catch-up. Events may have been missed or repeated.`);
+          if (catchingUp && entry.definition) { entry.definition.phase = 'catching-up'; save(entry); }
           const restarting = entry.watch !== undefined || entry.failure !== undefined;
           entry.failure = undefined;
           entry.diagnostic = undefined;
@@ -203,7 +234,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
             report(`MCP Events could not restore or start watch "${configured.id}". ${entry.diagnostic}${catchingUp ? ' Catch-up is incomplete; events may have been missed.' : ''}`);
             return;
           }
-          if (session.closed || entry.stopped || definition?.phase === 'stopped') return;
+          if (session.closed || entry.stopped || entry.definition?.phase === 'stopped') return;
           if (catchingUp && state.getCursor(key) === null) {
             let cleanup = '';
             if (configured.mode === 'webhook') {
@@ -211,7 +242,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
               catch (error) { cleanup = ` Webhook cleanup could not be confirmed. ${failureDiagnostic(error)}`; }
             }
             if (session.closed || entry.stopped) return;
-            definition!.phase = 'expired';
+            entry.definition!.phase = 'expired';
             warn(entry, `MCP Events watch "${configured.id}" expired. Replay is unavailable without a saved cursor; events may have been missed.${cleanup}`);
             return;
           }
@@ -239,8 +270,8 @@ export default function mcpEvents(pi: ExtensionAPI) {
                   entry.webhookDiagnostic = diagnostic;
                 }
               } else {
-                if (observation.type === 'event' && definition?.expiresAt !== undefined
-                  && Date.parse(normalizeTimestampOffset(observation.event.timestamp)) > definition.expiresAt) {
+                if (observation.type === 'event' && entry.definition?.expiresAt !== undefined
+                  && Date.parse(normalizeTimestampOffset(observation.event.timestamp)) > entry.definition.expiresAt) {
                   if (!catchingUp && !entry.warning) warn(entry, `MCP Events watch "${configured.id}" ignored an event timestamped after expiry. Out-of-order events may leave replay incomplete.`);
                   return;
                 }
@@ -254,7 +285,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
             }, cursor => {
               if (session.closed) throw new WatchRequestError('Pi session changed');
               state.setCursor(key, cursor);
-            }, catchingUp ? {until: definition!.expiresAt!} : undefined);
+            }, catchingUp ? {until: entry.definition!.expiresAt!} : undefined);
             entry.watch = watch;
             armExpiry();
             void watch.closed.catch(error => {
@@ -270,17 +301,17 @@ export default function mcpEvents(pi: ExtensionAPI) {
             });
             if (catchingUp) {
               await watch.closed;
-              if (!session.closed && definition?.phase === 'catching-up') {
-                definition.phase = 'expired';
+              if (!session.closed && entry.definition?.phase === 'catching-up') {
+                entry.definition.phase = 'expired';
                 if (!watch.replayComplete) warn(entry, `MCP Events watch "${configured.id}" expired. Bounded catch-up ended; completeness is unknown and events may have been missed.`);
                 else { save(entry); report(`MCP Events watch "${configured.id}" expired. Available polling pages have been drained; accepted events remain queued for delivery.`); }
               }
             } else {
               await watch.ready;
-              if (!session.closed && !entry.stopped && definition?.replaces) {
-                if (session.watches.has(definition.replaces)) await session.stopWatch!(definition.replaces);
-                delete definition.replaces;
-                save(entry);
+              if (!session.closed && !entry.stopped && entry.definition?.replaces) {
+                if (session.watches.has(entry.definition.replaces)) await session.stopWatch!(entry.definition.replaces, false);
+                delete entry.definition.replaces;
+                save(entry, true);
               }
             }
           } catch (error) {
@@ -299,11 +330,12 @@ export default function mcpEvents(pi: ExtensionAPI) {
         entry.start = () => {
           if (entry.starting) return entry.starting;
           if (entry.watch && entry.watch.status !== 'stopped') return Promise.resolve();
-          if (definition?.phase === 'stopped' || definition?.phase === 'expired') return Promise.resolve();
+          if (entry.definition?.phase === 'stopped' || entry.definition?.phase === 'expired') return Promise.resolve();
           entry.stopped = false;
           entry.starting = launch().finally(() => { entry.starting = undefined; });
           return entry.starting;
         };
+        entry.armExpiry = armExpiry;
         armExpiry();
         return entry;
       };
@@ -325,6 +357,8 @@ export default function mcpEvents(pi: ExtensionAPI) {
         }
         const old = replacing ? session.watches.get(replacing) : undefined;
         if (replacing && !old) throw new WatchRequestError('Unknown watch to replace. List watches first.');
+        const current = currentOverride(old);
+        if (current && current !== replacing) throw new WatchRequestError('This watch has been replaced. List watches and update the current replacement.');
         if (input.expiresAt !== undefined && (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > 8.64e15)) throw new WatchRequestError('expiresAt must be a future Unix time in milliseconds.');
         const connected = connection(input.server);
         await connected.ready;
@@ -337,23 +371,41 @@ export default function mcpEvents(pi: ExtensionAPI) {
         const existing = duplicate(options);
         if (existing) {
           if (old && existing[1] !== old) throw new WatchRequestError(`Replacement duplicates watch "${existing[0]}". The original watch is unchanged.`);
-          if (old && input.expiresAt !== old.definition?.expiresAt) throw new WatchRequestError('Changing expiry for the same subscription requires stopping it first. The original watch is unchanged.');
+          if (!old && input.expiresAt !== undefined && input.expiresAt !== existing[1].definition?.expiresAt) {
+            throw new WatchRequestError(`Watch "${existing[0]}" is already running with a different expiry. Use mcp_events_update with its ID to change the expiry.`);
+          }
+          if (old) {
+            const definition = define(existing[0], old);
+            if (input.expiresAt === undefined) delete definition.expiresAt;
+            else definition.expiresAt = input.expiresAt;
+            save(old, true);
+            old.armExpiry?.();
+          }
           return {existing: true, watch: describeWatch(existing[0], existing[1], state)};
         }
-        const definition = watchDefinition.parse({...options, id: randomUUID(), phase: 'active', ...(replacing ? {replaces: replacing} : {})});
-        state.saveWatch(definition);
+        const configuredId = old?.definition?.configuredId ?? (old && !old.definition ? replacing : undefined);
+        const definition = watchDefinition.parse({
+          ...(old ? {maxEvents: old.options.maxEvents, maxAgeMs: old.options.maxAgeMs, ttlMs: old.options.ttlMs} : {}),
+          ...options, id: randomUUID(), phase: 'active', configuredId, ...(replacing ? {replaces: replacing} : {}),
+        });
+        state.saveWatch(definition, undefined, historyCapacity());
+        pruneHistory();
         if (old && old.server === input.server && old.name === input.name && canonical(old.options.arguments) === canonical(input.arguments)) {
           state.setCursor(identity(definition), old.watch?.cursor ?? null);
         }
         const entry = register(definition, definition);
         await entry.start!();
         if (entry.failure || entry.watch?.status !== 'active') {
-          await session.stopWatch!(definition.id);
+          await session.stopWatch!(definition.id, false);
+          state.removeWatch(definition.id);
+          pruneHistory();
           throw new WatchRequestError(`${entry.diagnostic ?? 'Subscription did not become ready.'} The original watch, if any, is unchanged.`);
         }
         return {watch: describeWatch(definition.id, entry, state), continuity: old ? 'Replacement is active. Continuity between subscription scopes is not guaranteed.' : undefined};
       };
-      for (const configured of config.watches) register(configured);
+      const overrides = state.configuredOverrides;
+      const defaults = config.watches.filter(watch => !Object.hasOwn(overrides, watch.id));
+      for (const configured of defaults) register(configured);
       for (const definition of state.watches) {
         if (session.watches.has(definition.id)) {
           report(`MCP Events saved watch "${definition.id}" conflicts with a configured watch ID. Only the configured watch will start.`);
@@ -365,10 +417,10 @@ export default function mcpEvents(pi: ExtensionAPI) {
       state.retainCursors(keys);
       state.retainWebhookIdentities(keys);
       // Configured definitions win restoration conflicts, even while their connections are starting.
-      await Promise.all(config.watches.map(({id}) => session.watches.get(id)!.start!()));
+      await Promise.all(defaults.map(({id}) => session.watches.get(id)!.start!()));
       await Promise.all([...session.watches].map(async ([id, entry]) => {
         if (!entry.definition || ['stopped', 'expired'].includes(entry.definition.phase)) return;
-        if (config.watches.some(configured => subscriptionKey(configured) === subscriptionKey({...entry.options, server: entry.server}))) {
+        if (defaults.some(configured => subscriptionKey(configured) === subscriptionKey({...entry.options, server: entry.server}))) {
           entry.failure = 'could not start';
           warn(entry, `MCP Events saved watch "${id}" conflicts with a configured subscription. Only the configured watch will start.`);
         } else await entry.start!();
@@ -411,7 +463,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: 'mcp_events_start', label: 'Start event watch',
-    description: 'Start a session event watch. Defaults to push, then poll. Returns an existing watch for duplicate subscriptions. Optional absolute expiry bounds delivery by event timestamp.',
+    description: 'Start a session event watch. Defaults to push, then poll. Returns an existing watch for duplicate subscriptions; use update to change its expiry. Optional absolute expiry bounds delivery by event timestamp.',
     promptSnippet: 'Start a session event watch, optionally until an expiry.', promptGuidelines: guidelines,
     parameters: Type.Object(input), executionMode: 'sequential',
     execute: async (_id, params) => request(session => session.create!(params)),
@@ -425,13 +477,13 @@ export default function mcpEvents(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: 'mcp_events_update', label: 'Change event watch',
-    description: 'Replace a watch with a new subscription. Supply the complete desired event and arguments. Starts the replacement before stopping the original; failure keeps the original. Continuity between scopes is not guaranteed.',
+    description: 'Change a conversational or declared watch for this session. Supply the complete desired event and arguments; omit expiry to remove it. Expiry-only changes keep the ID and connection. Other changes start a replacement before stopping the original; failure keeps the original. Saved sessions retain changes after reload. Continuity between scopes is not guaranteed.',
     parameters: Type.Object({id: Type.String(), ...input}), executionMode: 'sequential',
     execute: async (_id, {id, ...params}) => request(session => session.create!(params, id)),
   });
   pi.registerTool({
     name: 'mcp_events_stop', label: 'Stop event watch',
-    description: 'Stop a configured or conversational watch by ID. Cancels expiry catch-up. Already accepted inbox events finish processing. Configured watches restart on reload.',
+    description: 'Stop a configured or conversational watch by ID. Cancels expiry catch-up. Already accepted inbox events finish processing. Saved sessions retain stops and configured-watch overrides after reload. In-memory overrides end on reload.',
     parameters: Type.Object({id: Type.String()}), executionMode: 'sequential',
     execute: async (_id, params) => request(async session => {
       await session.stopWatch!(params.id);
@@ -448,11 +500,17 @@ export default function mcpEvents(pi: ExtensionAPI) {
         if (!entry?.start) { ctx.ui.notify(`MCP Events watch "${id}" was not found. Use /mcp-events status to list watches.`, 'warning'); return; }
         if (entry.watch && entry.watch.status !== 'stopped') { report(`MCP Events watch "${id}" is already running.`); return; }
         if (entry.definition) {
+          const overrides = active?.state?.configuredOverrides ?? {};
+          const configuredId = entry.definition.configuredId;
+          const current = configuredId !== undefined && Object.hasOwn(overrides, configuredId) ? overrides[configuredId] : undefined;
+          if (current && current !== id) {
+            report(`MCP Events watch "${id}" was replaced. Use /mcp-events status to find the current watch.`); return;
+          }
           if (entry.definition.expiresAt !== undefined && entry.definition.expiresAt <= Date.now()) {
             report(`MCP Events watch "${id}" has expired. Start a new watch with a future expiry.`); return;
           }
           entry.definition.phase = 'active';
-          active?.state?.saveWatch(entry.definition);
+          active?.state?.saveWatch(entry.definition, entry.definition.configuredId);
         }
         await entry.start();
         if (entry.failure) { ctx.ui.notify(`MCP Events watch "${id}" could not start. Use /mcp-events status for details.`, 'warning'); return; }
@@ -478,7 +536,7 @@ export default function mcpEvents(pi: ExtensionAPI) {
       const running = [...session?.watches.values() ?? []].filter(entry => entry.starting || (entry.watch && entry.watch.status !== 'stopped')).length;
       const watches = [...session?.watches ?? []].map(([id, entry]) =>
         [`${id}: ${entry.starting ? 'starting' : entry.failure ?? entry.watch?.status ?? 'stopped'} — ${entry.server} / ${entry.name} (${entry.mode})`,
-          ...[(entry.definition ? watchLifetime(entry, session!.state!) : 'configured; restarts on reload'), entry.warning, entry.diagnostic, entry.sourceDiagnostic, entry.webhookDiagnostic].filter(Boolean).map(text => `  ${text}`)].join('\n'));
+          ...[(entry.definition ? watchLifetime(entry, session!.state!) : 'project default; session changes override it'), entry.warning, entry.diagnostic, entry.sourceDiagnostic, entry.webhookDiagnostic].filter(Boolean).map(text => `  ${text}`)].join('\n'));
       const catalogWarnings = [...session?.clients ?? []].filter(([, connection]) => connection.catalogFailed)
         .map(([server]) => `Catalog updates stopped for ${server}. Watch definitions may be outdated. Use /reload to reconnect.`);
       const schemaWarnings = [...session?.clients ?? []].flatMap(([server, {client}]) => client.catalogIssues

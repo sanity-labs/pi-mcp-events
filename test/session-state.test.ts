@@ -261,3 +261,17 @@ it('restores watch definitions independently and preserves them when persistence
   expect(state.watches[0]!.phase).toBe('stopped');
   expect(state.warning?.operation).toBe('write');
 });
+
+it('keeps configured overrides in memory when saving fails and leaves disk state unchanged', () => {
+  const path = file();
+  const state = new SessionState(path);
+  const watch = {id: 'chat', configuredId: 'default', server: 'weather', name: 'weather.alert', arguments: {}, mode: 'push' as const, phase: 'active' as const};
+  state.saveWatch(watch, 'default');
+  vi.spyOn(fs, 'renameSync').mockImplementation(denied);
+  state.saveWatch({...watch, id: 'replacement'}, 'default');
+  expect(state.mode).toBe('degraded');
+  expect(state.configuredOverrides).toEqual({default: 'replacement'});
+  expect(new SessionState(path).configuredOverrides).toEqual({default: 'chat'});
+  state.removeWatch('replacement');
+  expect(state.configuredOverrides).toEqual({});
+});
