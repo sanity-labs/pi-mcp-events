@@ -12,6 +12,13 @@ export default function testModel(pi) {
     if (last?.role === 'user' && JSON.stringify(last.content).includes('HOLD_TEST')) {
       while (!existsSync(process.env.EVENTS_TEST_RELEASE) && !options?.signal?.aborted) await delay(10);
     }
+    if (last?.role === 'user') {
+      const text = typeof last.content === 'string' ? last.content : last.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+      if (text.startsWith('EVENT_TOOL ')) {
+        const request = JSON.parse(text.slice('EVENT_TOOL '.length));
+        return fauxAssistantMessage(fauxToolCall(request.name, request.arguments), {stopReason: 'toolUse'});
+      }
+    }
     if (last?.role === 'user' && JSON.stringify(last.content).includes('READ_TEST')) {
       return fauxAssistantMessage(fauxToolCall('read', {path: 'ordinary.txt'}), {stopReason: 'toolUse'});
     }
