@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {mkdtempSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import type {JSONRPCRequest} from '@modelcontextprotocol/client';
@@ -22,7 +22,7 @@ const descriptor = {name: 'weather.alert', description: 'Raised and cleared stor
   inputSchema: {type: 'object', required: ['stationId'], properties: {stationId: {type: 'string'}}, additionalProperties: false}, payloadSchema: {type: 'object'}};
 const input = {server: 'weather', name: descriptor.name, arguments: {stationId: 'harbor'}};
 const event = (id: string, timestamp = new Date().toISOString()) => ({eventId: id, name: descriptor.name, timestamp, cursor: id, data: {warning: 'raised'}});
-type Listed = {watches: Array<{id: string; status: string; phase?: string; pending: number; mode: string; warnings: string[]; lifetime: string}>};
+type Listed = {watches: Array<{id: string; configuredId?: string; arguments: Record<string, unknown>; expiresAt?: number; status: string; phase?: string; pending: number; mode: string; warnings: string[]; lifetime: string}>};
 async function setup({saved = false, configured = false, maxSubscriptions = 32} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-conversational-'));
   cleanups.push(() => rmSync(directory, {recursive: true, force: true}));
@@ -53,8 +53,9 @@ async function setup({saved = false, configured = false, maxSubscriptions = 32} 
   });
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
   const tools = new Map<string, ToolDefinition>();
+  let command: {handler: (args: string, ctx: ExtensionContext) => Promise<void>};
   const messages = vi.fn(); const emit = vi.fn();
-  const pi = {registerMessageRenderer: vi.fn(), registerCommand: vi.fn(),
+  const pi = {registerMessageRenderer: vi.fn(), registerCommand: (_name: string, value: typeof command) => {command = value;},
     on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void>) => handlers.set(name, handler),
     registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool), sendMessage: messages, events: {emit}} as unknown as ExtensionAPI;
   extension(pi);
@@ -69,7 +70,7 @@ async function setup({saved = false, configured = false, maxSubscriptions = 32} 
   const call = (action: string, params: Record<string, unknown> = {}) => tools.get(`mcp_events_${action}`)!.execute('call', params, undefined, undefined, ctx as ExtensionToolContext);
   const list = async () => (await call('list')).details as Listed;
   const statePath = () => join(directory, `${createHash('sha256').update(`${configPath}\0${sessionId}`).digest('hex')}.json`);
-  return {call, list, reload, directory, statePath, messages, emit, writeConfig,
+  return {call, list, reload, directory, command: (args: string) => command.handler(args, ctx), config: () => readFileSync(configPath, 'utf8'), statePath, messages, emit, writeConfig,
     newSession: async () => {sessionId = 'two'; await reload();},
     setFail: (value: boolean) => {fail = value;},
     replay: (values: ReturnType<typeof event>[]) => {pollEvents = values;},
@@ -222,4 +223,146 @@ it('calculates a duration from the client clock and rejects conflicting expiry i
   expect(result.watch.expiresAt).toBeGreaterThanOrEqual(before + 60_000);
   expect(result.watch.expiresAt).toBeLessThanOrEqual(Date.now() + 60_000);
   expect((await h.call('start', {...input, durationMs: 1000, expiresAt: Date.now() + 1000})).isError).toBe(true);
+});
+
+it.each(['push', 'poll'])('keeps only the %s replacement of a configured watch after saved reload', async mode => {
+  const h = await setup({saved: true, configured: true});
+  const config = h.config();
+  const result = await h.call('update', {...input, id: 'configured', mode, arguments: {stationId: 'hilltop'}});
+  expect(result.isError).not.toBe(true);
+  const replacement = (result.details as {watch: {id: string}}).watch;
+  await h.reload();
+  expect((await h.list()).watches.filter(w => w.status === 'active')).toEqual([
+    expect.objectContaining({id: replacement.id, configuredId: 'configured', mode, arguments: {stationId: 'hilltop'}}),
+  ]);
+  expect(h.config()).toBe(config);
+  await h.call('stop', {id: replacement.id});
+  await h.reload();
+  expect((await h.list()).watches.every(w => w.status === 'stopped')).toBe(true);
+  await h.newSession();
+  expect((await h.list()).watches).toEqual([expect.objectContaining({id: 'configured', status: 'active'})]);
+});
+
+it('saves a configured stop and can explicitly restart the same ID and cursor', async () => {
+  const h = await setup({saved: true, configured: true});
+  h.send('config-cursor');
+  await vi.waitFor(() => expect(new SessionState(h.statePath()).size).toBe(1));
+  await h.call('stop', {id: 'configured'});
+  await h.reload();
+  expect((await h.list()).watches).toEqual([expect.objectContaining({id: 'configured', phase: 'stopped', pending: 1})]);
+  await h.command('start configured');
+  expect((await h.list()).watches[0]).toMatchObject({id: 'configured', status: 'active'});
+  const stream = h.getTransport().messages.find(({message}) => 'method' in message && message.method === 'events/stream')!;
+  expect('params' in stream.message && stream.message.params?.cursor).toBe('config-cursor');
+  await h.reload();
+  expect((await h.list()).watches[0].status).toBe('active');
+});
+
+it('discards in-memory configured overrides on reload', async () => {
+  const h = await setup({configured: true});
+  await h.call('update', {...input, id: 'configured', mode: 'poll'});
+  await h.reload();
+  expect((await h.list()).watches).toEqual([expect.objectContaining({id: 'configured', mode: 'push', status: 'active'})]);
+  await h.call('stop', {id: 'configured'});
+  await h.reload();
+  expect((await h.list()).watches[0].status).toBe('active');
+});
+
+it('keeps the previous configured override after a failed replacement or a stop of its old ID', async () => {
+  const h = await setup({saved: true, configured: true});
+  const replacement = ((await h.call('update', {...input, id: 'configured', arguments: {stationId: 'hilltop'}})).details as {watch: {id: string}}).watch;
+  h.setFail(true);
+  expect((await h.call('update', {...input, id: replacement.id, arguments: {stationId: 'other'}})).isError).toBe(true);
+  await h.call('stop', {id: 'configured'});
+  await h.command('start configured');
+  expect((await h.call('update', {...input, id: 'configured'})).isError).toBe(true);
+  h.setFail(false);
+  await h.reload();
+  expect((await h.list()).watches.filter(w => w.status === 'active')).toEqual([expect.objectContaining({id: replacement.id})]);
+});
+
+it('rejects duplicate starts with a different explicit expiry and updates expiry without reconnecting', async () => {
+  const h = await setup({saved: true, configured: true, maxSubscriptions: 1});
+  expect((await h.call('start', {...input, durationMs: 60_000})).isError).toBe(true);
+  expect((await h.call('start', input)).details).toMatchObject({existing: true, watch: {id: 'configured'}});
+  const before = h.getTransport().messages.length;
+  const expiry = Date.now() + 60_000;
+  expect((await h.call('update', {...input, id: 'configured', expiresAt: expiry})).details).toMatchObject({watch: {id: 'configured', expiresAt: expiry}});
+  expect(h.getTransport().messages).toHaveLength(before);
+  await h.reload();
+  expect((await h.list()).watches[0]).toMatchObject({id: 'configured', expiresAt: expiry, status: 'active'});
+  expect((await h.call('start', {...input, expiresAt: expiry})).details).toMatchObject({existing: true});
+  expect((await h.call('start', {...input, durationMs: 120_000})).isError).toBe(true);
+  await h.call('update', {...input, id: 'configured'});
+  expect((await h.list()).watches[0].expiresAt).toBeUndefined();
+});
+
+it('arms expiry when changing a configured watch without replacing its subscription', async () => {
+  const h = await setup({saved: true, configured: true});
+  await h.call('update', {...input, id: 'configured', durationMs: 100});
+  await vi.waitFor(async () => expect((await h.list()).watches[0].phase).toBe('expired'));
+  await h.reload();
+  expect((await h.list()).watches[0]).toMatchObject({phase: 'expired', status: 'stopped'});
+});
+
+it('cleans up 520 failed starts so a valid watch still starts after reload', async () => {
+  const h = await setup({saved: true});
+  for (let i = 0; i < 520; i++) {
+    expect((await h.call('start', {...input, arguments: {invalid: i}})).isError).toBe(true);
+  }
+  expect((await h.list()).watches).toEqual([]);
+  await h.reload();
+  expect((await h.call('start', input)).isError).not.toBe(true);
+}, 30_000);
+
+it('prunes old stopped history without dropping accepted inbox events', async () => {
+  const h = await setup({saved: true});
+  const first = ((await h.call('start', input)).details as {watch: {id: string}}).watch;
+  h.send('retained-event');
+  await vi.waitFor(() => expect(new SessionState(h.statePath()).size).toBe(1));
+  await h.call('stop', {id: first.id});
+  const state = new SessionState(h.statePath());
+  const stopped = state.watches[0];
+  for (let i = 0; i < 511; i++) state.saveWatch({...stopped, id: `old-${i}`});
+  await h.reload();
+  expect((await h.call('start', input)).isError).not.toBe(true);
+  expect((await h.list()).watches).toHaveLength(512);
+  expect((await h.list()).watches.some(w => w.id === first.id)).toBe(false);
+  expect(new SessionState(h.statePath()).size).toBe(1);
+}, 30_000);
+
+it('keeps cursor capacity available across more than 512 successful starts and stops', async () => {
+  const h = await setup({configured: true});
+  const other = {...input, arguments: {stationId: 'hilltop'}};
+  for (let i = 0; i < 520; i++) {
+    const result = await h.call('start', other);
+    expect(result.isError).not.toBe(true);
+    const id = (result.details as {watch: {id: string}}).watch.id;
+    expect((await h.call('stop', {id})).isError).not.toBe(true);
+  }
+  expect((await h.list()).watches).toHaveLength(512);
+  expect((await h.call('start', other)).isError).not.toBe(true);
+}, 30_000);
+
+it('retains declared delivery options when a stopped watch resumes', async () => {
+  const h = await setup({saved: true});
+  h.writeConfig([{...input, id: 'configured', mode: 'poll', maxEvents: 7, maxAgeMs: 1000, ttlMs: 2000}]);
+  await h.reload();
+  await h.call('stop', {id: 'configured'});
+  await h.reload();
+  await h.command('start configured');
+  const request = h.getTransport().messages.find(({message}) => 'method' in message && message.method === 'events/poll')!;
+  expect('params' in request.message && request.message.params).toMatchObject({maxEvents: 7, maxAgeMs: 1000});
+  expect(new SessionState(h.statePath()).watches[0]).toMatchObject({maxEvents: 7, maxAgeMs: 1000, ttlMs: 2000});
+});
+
+it('finishes an interrupted configured replacement without restoring both watches', async () => {
+  const h = await setup({saved: true, configured: true});
+  const definition: WatchDefinition = {...input, id: 'replacement', configuredId: 'configured', replaces: 'configured', mode: 'poll', phase: 'active'};
+  new SessionState(h.statePath()).saveWatch(definition);
+  await h.reload();
+  expect((await h.list()).watches.filter(w => w.status === 'active')).toEqual([expect.objectContaining({id: 'replacement'})]);
+  expect(new SessionState(h.statePath()).configuredOverrides).toEqual({configured: 'replacement'});
+  await h.reload();
+  expect((await h.list()).watches.filter(w => w.status === 'active')).toEqual([expect.objectContaining({id: 'replacement'})]);
 });

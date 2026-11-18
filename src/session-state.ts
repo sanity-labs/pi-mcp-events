@@ -55,7 +55,9 @@ export class SessionState {
   }
 
   get watches() { return this.definitions.list(); }
-  saveWatch(value: WatchDefinition) { this.mutate(() => this.definitions.set(value)); }
+  get configuredOverrides() { return this.definitions.configuredOverrides(); }
+  saveWatch(value: WatchDefinition, configuredId?: string, maxEntries?: number) { this.mutate(() => this.definitions.set(value, configuredId, maxEntries)); }
+  removeWatch(id: string) { this.mutate(() => this.definitions.remove(id)); }
 
   get mode() { return this.persistence; }
   get warning() { return this.persistenceWarning; }
