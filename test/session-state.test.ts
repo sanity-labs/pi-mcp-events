@@ -245,3 +245,19 @@ describe('session persistence', () => {
     expect(new SessionState(path).getCursor('watch')).toBeNull();
   });
 });
+
+it('restores watch definitions independently and preserves them when persistence degrades', () => {
+  const path = file();
+  const state = new SessionState(path);
+  const watch = {id: 'chat', server: 'weather', name: 'weather.alert', arguments: {stationId: 'harbor'}, mode: 'push' as const, phase: 'active' as const, expiresAt: 2000000000000};
+  state.saveWatch(watch);
+  expect(new SessionState(path).watches).toEqual([watch]);
+  const listed = state.watches;
+  listed[0]!.arguments.stationId = 'changed';
+  expect(state.watches).toEqual([watch]);
+  vi.spyOn(fs, 'renameSync').mockImplementation(denied);
+  state.saveWatch({...watch, phase: 'stopped'});
+  expect(state.mode).toBe('degraded');
+  expect(state.watches[0]!.phase).toBe('stopped');
+  expect(state.warning?.operation).toBe('write');
+});

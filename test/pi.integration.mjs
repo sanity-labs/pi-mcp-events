@@ -40,7 +40,7 @@ function files(path) {
     return [full.slice(path.length), readFileSync(full, 'utf8')];
   }));
 }
-async function setup(t, {ephemeral = true, override = true, blocked = false, catalogUpdates = false, extraEvents = [], noExpiryWebhooks = false, configure = config => config} = {}) {
+async function setup(t, {ephemeral = true, override = true, blocked = false, catalogUpdates = false, extraEvents = [], noExpiryWebhooks = false, waitForWatches = true, configure = config => config} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-events-cli-'));
   const agentDir = join(directory, 'agent'); mkdirSync(agentDir);
   execFileSync(process.execPath, [cliPath, 'install', root], {
@@ -67,13 +67,13 @@ async function setup(t, {ephemeral = true, override = true, blocked = false, cat
   const start = async sessionFile => {
     rpc = new RpcClient({cliPath, cwd: directory, provider: 'events-test', model: 'local',
       env: {PI_CODING_AGENT_DIR: agentDir, PI_MCP_EVENTS_CONFIG: configPath, EVENTS_TEST_CONTEXTS: contexts, EVENTS_TEST_OBSERVATIONS: acceptedPath, EVENTS_TEST_RELEASE: release},
-      args: ['--offline', '--no-skills', '--no-prompt-templates', '--no-context-files', '--tools', 'read',
+      args: ['--offline', '--no-skills', '--no-prompt-templates', '--no-context-files', '--tools', waitForWatches ? 'read' : 'read,mcp_events_start,mcp_events_stop',
         '-e', modelPath,
         ...(ephemeral ? ['--no-session'] : ['--session-dir', join(directory, 'sessions')]), ...(sessionFile ? ['--session', sessionFile] : [])],
     });
     await rpc.start();
     await rpc.getState();
-    await until(() => fixture.stats().streams === 1 && fixture.stats().webhooks === 1 && fixture.requests.some(r => r.method === 'events/poll'), 'all subscriptions active');
+    if (waitForWatches) await until(() => fixture.stats().streams === 1 && fixture.stats().webhooks === 1 && fixture.requests.some(r => r.method === 'events/poll'), 'all subscriptions active');
     return rpc;
   };
   t.after(async () => { await rpc?.stop(); await fixture.close(); rmSync(directory, {recursive: true, force: true}); });
@@ -494,4 +494,28 @@ test('write failure switches an active saved session to memory and warns without
   await ordinaryTool(rpc);
   assert.ok((await rpc.getMessages()).some(message => message.role === 'toolResult' && !message.isError));
   await h.shutdown();
+});
+
+
+test('chat tools start a webhook on an unwatched server and clean it up on stop', {timeout: 45_000}, async t => {
+  const h = await setup(t, {waitForWatches: false, configure: config => ({...config, watches: []})});
+  const rpc = await h.start();
+  const call = async (action, args) => {
+    const name = `mcp_events_${action}`;
+    const results = async () => (await rpc.getMessages()).filter(message => message.role === 'toolResult' && message.toolName === name);
+    const count = (await results()).length;
+    await rpc.prompt(`EVENT_TOOL ${JSON.stringify({name, arguments: args})}`, undefined, 'followUp');
+    await until(async () => (await results()).length > count, name);
+    const result = (await results()).at(-1);
+    assert.ok(!result.isError, JSON.stringify(result));
+    return result.details;
+  };
+  const watch = (await call('start', {server: 'local', name: 'example.live_changed', mode: 'webhook', arguments: {channel: 'webhook'}})).watch;
+  assert.equal(watch.status, 'active');
+  assert.equal(h.fixture.stats().webhooks, 1);
+  await h.emit(99);
+  await until(async () => values(await rpc.getMessages()).some(([id, value]) => id === watch.id && value === 99), 'chat webhook event reaches Pi');
+  assert.equal((await call('stop', {id: watch.id})).watch.status, 'stopped');
+  assert.equal(h.fixture.stats().webhooks, 0);
+  assert.ok(!JSON.stringify(await rpc.getMessages()).includes('whsec_'));
 });

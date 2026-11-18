@@ -483,3 +483,32 @@ describe('webhook watches', () => {
     }
   });
 });
+
+it('bounds webhook catch-up independently of its lease and removes the remote subscription', async () => {
+  const s = await setup();
+  const observations: Observation[] = [];
+  const watch = s.client.watch(options, value => {observations.push(value);}, undefined,
+    {until: Date.parse('2026-10-25T12:00:00Z'), maxMs: 300});
+  await watch.ready;
+  expect(await s.post(s.subscriptions[0]!, {...event('later'), timestamp: '2026-10-25T12:00:01Z'})).toBe(204);
+  expect(await s.post(s.subscriptions[0]!, event('eligible'))).toBe(204);
+  await watch.closed;
+  expect(observations.filter(item => item.type === 'event').map(item => item.event.eventId)).toEqual(['eligible']);
+  expect(watch.replayComplete).toBe(false);
+  expect(s.unsubscribes).toHaveLength(1);
+  expect(s.unsubscribes[0]!.params).toMatchObject({name: options.name, delivery: {url: (s.subscriptions[0]!.params!.delivery as {url: string}).url}});
+});
+
+it('cleans up a restored webhook without starting delivery when replay is unavailable', async () => {
+  const s = await setup();
+  const watch = s.client.watch(options, () => {});
+  await watch.ready;
+  const delivery = s.subscriptions[0]!.params!.delivery as {url: string; secret: string};
+  const identity = {routeId: new URL(delivery.url).pathname.split('/').at(-1)!, secret: delivery.secret};
+  await watch.stop();
+  const before = s.unsubscribes.length;
+  await s.client.cleanupWebhook(options, identity);
+  expect(s.subscriptions).toHaveLength(1);
+  expect(s.unsubscribes).toHaveLength(before + 1);
+  expect((s.unsubscribes.at(-1)!.params!.delivery as {url: string}).url).toBe(delivery.url);
+});

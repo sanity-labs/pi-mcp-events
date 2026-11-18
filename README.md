@@ -30,6 +30,26 @@ pi install "$PWD"
 - For source installs, pull the reviewed changes and run `npm ci` again.
 - To remove an npm installation, run `pi remove npm:@sanity-labs/pi-mcp-events`. For a source installation, use `pi remove /absolute/path/to/pi-mcp-events`.
 
+## Watch events in conversation
+
+Configure servers in `.pi/mcp-events.json`, then reload Pi. The `watches` array is optional:
+
+```json
+{
+  "servers": {
+    "weather": {"transport": "http", "url": "http://127.0.0.1:3015/mcp"}
+  }
+}
+```
+
+Ask Pi: “Watch Harbor for storm warnings and all-clears.” Pi discovers `weather.alert` and starts it with `stationId: harbor`. You can ask it to list, change, or stop watches, choose a supported delivery mode, or watch for a duration. Pi uses push when available, otherwise polling. Webhook delivery requires a configured receiver.
+
+The tools are `mcp_events_discover`, `mcp_events_start`, `mcp_events_list`, `mcp_events_update`, and `mcp_events_stop`. Starting waits until the subscription is ready. A failed replacement keeps the original running; changing its scope does not guarantee continuity. Duplicate requests return the existing watch.
+
+Saved sessions restore conversational watches and their cursors after reload or resume. Stopped watches stay stopped. With `--no-session`, watches end on reload, session change, or exit. Configured watches still start from the config file, and `/mcp-events` commands work with both kinds. Stopping leaves already accepted events queued for delivery.
+
+Time-bound watches store an absolute expiry. At expiry, live delivery stops. After a disconnect, Pi attempts catch-up from the saved cursor and accepts only events timestamped at or before expiry. Catch-up is limited to five seconds and, for polling, 100 pages. Push and webhook replay has no completion signal, so its completeness remains unknown. A missing cursor, replay gap, error, or limit produces a warning; stopping explicitly cancels catch-up.
+
 ## Try the demo
 
 `pi-mcp-events` comes with a built-in MCP Events-enabled server that emits weather events. To try it out:
@@ -100,7 +120,7 @@ After reload completes, check the watches with a separate command:
 | `weather.changed` | Current reading and previous condition. |
 | `weather.alert` | Current reading, a storm warning message, and `raised` or `cleared` status. |
 
-All three support `poll` and `push`, with optional `"arguments": {"stationId": "harbor"}` or `"arguments": {"stationId": "hilltop"}` to follow one station. Change the configuration and `/reload` to try another event or mode. Replay keeps the last 1,000 events in memory; stale or pre-restart cursors report a gap.
+All three support `poll` and `push`, with optional `"arguments": {"stationId": "harbor"}` or `"arguments": {"stationId": "hilltop"}` to follow one station. Ask Pi to change a watch to try another event or mode, or edit the configuration and run `/reload`. Replay keeps the last 1,000 events in memory; stale or pre-restart cursors report a gap.
 
 The HTTP demo uses the proposal’s `x-mcp-header` annotation for the station filter. The client reads it from the catalog and sends `Mcp-Param-Station` automatically.
 
@@ -195,8 +215,8 @@ The extension starts configured watches automatically. With no configuration fil
 | Command | What it does |
 | --- | --- |
 | `/mcp-events` or `/mcp-events status` | Show each watch's server, event, transport, and status, plus persistence mode, state location, and pending count. |
-| `/mcp-events start <watchId>` | Start a stopped or failed configured watch without restarting other watches. Starting a running watch has no effect. |
-| `/mcp-events stop <watchId>` | Stop the watch with the configured `id` (for example, `changes`). |
+| `/mcp-events start <watchId>` | Start a stopped or failed watch that has not expired, without restarting other watches. Starting a running watch has no effect. |
+| `/mcp-events stop <watchId>` | Stop a configured or conversational watch by ID. |
 | `/mcp-events stop` | Stop all watches and close the extension's connections. |
 
 Stopped and failed watches remain visible for the active Pi session, including after stopping all watches. Use `/mcp-events start <watchId>` to start one again with its retained cursor. Replay depends on the server and available history; missed events may be unavailable or reported as a gap. Webhook watches subscribe again and renew under the server's granted lifetime. Use `/reload` to reread configuration and restart all configured watches.

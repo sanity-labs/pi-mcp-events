@@ -4,7 +4,7 @@ import {ProtocolError, type StandardSchemaV1} from '@modelcontextprotocol/client
 import delay from 'delay';
 import {z} from 'zod';
 import {
-  canonical, catalogResult, EventMethod, EventProtocolError, EventProtocolErrorCode, pollResult,
+  canonical, catalogResult, completeResult, normalizeTimestampOffset, EventMethod, EventProtocolError, EventProtocolErrorCode, pollResult,
   type EventDescriptor, type EventOccurrence, type WebhookDeliveryStatus,
 } from './protocol.ts';
 import {EventsClientError, EventsClientErrorCode as ErrorCode, limitExceeded} from './errors.ts';
@@ -36,7 +36,9 @@ export type Observation =
   | {type: 'status'; status: 'webhook-delivery'; deliveryStatus: WebhookDeliveryStatus}
   | {type: 'status'; status: 'source-error'; error: EventProtocolError};
 export type WatchStatus = 'starting' | 'active' | 'retrying' | 'suspended' | 'stopped';
+export type CatchUpOptions = {until: number; maxPages?: number; maxMs?: number};
 export type Watch = {
+  readonly replayComplete: boolean;
   readonly status: WatchStatus;
   readonly ready: Promise<void>;
   readonly closed: Promise<void>;
@@ -185,11 +187,15 @@ export class EventsClient {
     catch (error) { throw new EventsClientError(ErrorCode.InvalidArguments, 'Subscription arguments do not match inputSchema', {cause: error}); }
     return contract;
   }
-  watch(input: WatchOptions, accept: (observation: Observation) => Promise<void> | void, checkpoint?: (cursor: string | null) => Promise<void> | void): Watch {
+  watch(input: WatchOptions, accept: (observation: Observation) => Promise<void> | void, checkpoint?: (cursor: string | null) => Promise<void> | void, catchUp?: CatchUpOptions): Watch {
     this.assertOpen();
     const parsed = watchOptionsSchema.safeParse(input);
     if (!parsed.success) throw new EventsClientError(ErrorCode.InvalidOptions, 'Invalid event watch options', {cause: parsed.error});
     const options = parsed.data;
+    if (catchUp) {
+      const bounded = z.strictObject({until: z.number().int().min(0).max(8.64e15), maxPages: z.number().int().positive().max(100).optional(), maxMs: z.number().int().positive().max(5000).optional()}).safeParse(catchUp);
+      if (!bounded.success || options.cursor === undefined || options.cursor === null) throw new EventsClientError(ErrorCode.InvalidOptions, 'Catch-up requires a saved cursor and bounded replay options');
+    }
     this.contract(options);
     if (options.mode === 'webhook' && !this.settings.webhookReceiver) {
       throw new EventsClientError(ErrorCode.InvalidOptions, 'Webhook watches require a webhookReceiver');
@@ -201,6 +207,10 @@ export class EventsClient {
     if (this.watches.size >= this.settings.maxSubscriptions) throw limitExceeded('maxSubscriptions', this.settings.maxSubscriptions);
     const local = new AbortController();
     const signal = AbortSignal.any([local.signal, this.lifetime.signal]);
+    let replayComplete = false;
+    let replayGap = false;
+    let pages = 0;
+    const catchUpTimer = catchUp ? setTimeout(() => local.abort(new EventsClientError(ErrorCode.Stopped, 'Catch-up time limit reached')), catchUp.maxMs ?? 5000) : undefined;
     const ready = Promise.withResolvers<void>();
     void ready.promise.catch(() => {});
     let cursor = options.cursor ?? null;
@@ -214,10 +224,13 @@ export class EventsClient {
     const retry = <T>(operation: () => Promise<T>) => retryOperation(operation, {
       ...this.settings, signal, onRetry: () => status('retrying'),
     });
-    const deliver = (observation: Observation) => retry(async () => {
-      try { await accept(observation); }
-      catch (error) { throw new EventsClientError(ErrorCode.ConsumerRejected, 'Event consumer rejected delivery', {cause: error}); }
-    });
+    const deliver = (observation: Observation) => {
+      if (observation.type === 'gap') replayGap = true;
+      return retry(async () => {
+        try { await accept(observation); }
+        catch (error) { throw new EventsClientError(ErrorCode.ConsumerRejected, 'Event consumer rejected delivery', {cause: error}); }
+      });
+    };
     const advance = async (next: string | null) => {
       await retry(async () => {
         try { await checkpoint?.(next); }
@@ -241,7 +254,7 @@ export class EventsClient {
         validateEvent(event);
       }
       if (seen.has(event.eventId)) return false;
-      await deliver({type: 'event', event});
+      if (!catchUp || Date.parse(normalizeTimestampOffset(event.timestamp)) <= catchUp.until) await deliver({type: 'event', event});
       seen.add(event.eventId);
       if (seen.size > this.settings.maxTrackedEventIds) seen.delete(seen.values().next().value!);
       return true;
@@ -272,7 +285,7 @@ export class EventsClient {
           if (result.events.length > options.maxEvents) throw new EventsClientError(ErrorCode.InvalidResponse, 'Poll response exceeds the requested batch size', {details: {maxEvents: options.maxEvents}});
           if (Buffer.byteLength(JSON.stringify(result)) > this.settings.maxPollBytes) throw limitExceeded('maxPollBytes', this.settings.maxPollBytes);
           let progressed = result.cursor !== cursor;
-          if (result.cursor !== null && result.truncated) await deliver({type: 'gap', cursor: result.cursor});
+          if ((result.cursor !== null || catchUp) && result.truncated) await deliver({type: 'gap', cursor: result.cursor});
           for (const event of result.events) {
             signal.throwIfAborted();
             if (await emit(event)) progressed = true;
@@ -288,6 +301,11 @@ export class EventsClient {
           shouldRetry: error => error instanceof StalledPollError || retryable(error)
             || (error instanceof EventProtocolError && error.code === EventProtocolErrorCode.ResourceExhausted),
         });
+        if (catchUp) {
+          pages++;
+          if (!result.hasMore) { replayComplete = result.cursor !== null && !replayGap; return; }
+          if (pages >= (catchUp.maxPages ?? 100)) return;
+        }
         if (!result.hasMore) await delay(Math.max(this.settings.pollFloorMs, result.nextPollMs), {signal});
       }
     };
@@ -318,7 +336,7 @@ export class EventsClient {
               ...(options.maxAgeMs === undefined ? {} : {maxAgeMs: options.maxAgeMs}),
             }, signal, this.settings.heartbeatMs, {
               active: async (next, truncated) => {
-                if (next !== null && truncated) await deliver({type: 'gap', cursor: next});
+                if ((next !== null || catchUp) && truncated) await deliver({type: 'gap', cursor: next});
                 await advance(next);
                 currentStatus = 'active';
                 ready.resolve();
@@ -361,7 +379,7 @@ export class EventsClient {
             validate: () => { this.contract(options); },
             cursor: () => cursor,
             active: async (next, truncated) => {
-              if (next !== null && truncated) await deliver({type: 'gap', cursor: next});
+              if ((next !== null || catchUp) && truncated) await deliver({type: 'gap', cursor: next});
               await advance(next);
               // A successful refresh resumes delivery; its diagnostic status can describe prior suspension.
               currentStatus = 'active';
@@ -405,6 +423,7 @@ export class EventsClient {
           throw error;
         }
       } finally {
+        clearTimeout(catchUpTimer);
         currentStatus = 'stopped';
         ready.reject(new EventsClientError(ErrorCode.Stopped, 'Subscription stopped before becoming active'));
         this.watches.delete(key);
@@ -413,7 +432,7 @@ export class EventsClient {
     const closed = Promise.resolve().then(run);
     void closed.catch(() => {});
     const watch: Watch = {
-      options, ready: ready.promise, closed, get cursor() { return cursor; }, get status() { return currentStatus; },
+      options, ready: ready.promise, closed, get replayComplete() { return replayComplete; }, get cursor() { return cursor; }, get status() { return currentStatus; },
       stop: async () => {
         local.abort(new EventsClientError(ErrorCode.Stopped, 'Event subscription stopped'));
         await closed.catch(() => {});
@@ -421,6 +440,16 @@ export class EventsClient {
     };
     this.watches.set(key, watch);
     return watch;
+  }
+  async cleanupWebhook(options: Pick<WatchOptions, 'name' | 'arguments'>, identity: WebhookIdentity) {
+    this.assertOpen();
+    const receiver = this.settings.webhookReceiver;
+    if (!receiver) throw new EventsClientError(ErrorCode.InvalidOptions, 'Webhook cleanup requires a webhookReceiver');
+    const registration = receiver.register(() => {}, identity);
+    try {
+      const signal = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(this.settings.webhookUnsubscribeTimeoutMs)]);
+      await this.request(EventMethod.Unsubscribe, {name: options.name, arguments: options.arguments, delivery: {url: registration.url}}, completeResult, signal);
+    } finally { await registration.close(); }
   }
   async close() {
     this.lifetime.abort(new EventsClientError(ErrorCode.Closed, 'MCP Events client is closed'));

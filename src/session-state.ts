@@ -1,3 +1,4 @@
+import {WatchDefinitions, type WatchDefinition} from './watch-definitions.ts';
 import {WebhookIdentities} from './webhook-identities.ts';
 import {EventsClientError, EventsClientErrorCode as ErrorCode} from './errors.ts';
 import {Checkpoints, Inbox, type CheckpointOptions, type InboxItem, type InboxOptions} from './inbox.ts';
@@ -19,6 +20,7 @@ export class SessionState {
   private inbox: Inbox;
   private checkpoints: Checkpoints;
   private identities: WebhookIdentities;
+  private definitions = new WatchDefinitions();
   private persistence: 'memory' | 'persistent' | 'degraded';
   private persistenceWarning?: PersistenceWarning;
   private readonly onWarning?: SessionStateOptions['onWarning'];
@@ -45,11 +47,15 @@ export class SessionState {
       this.checkpoints = new Checkpoints(`${path}.cursors.json`, options.checkpoints);
     });
     restore(() => { this.identities = new WebhookIdentities(`${path}.webhooks.json`, options.checkpoints); });
+    restore(() => { this.definitions = new WatchDefinitions(`${path}.watches.json`); });
     if (readError) {
       this.degrade(readError, 'read');
       this.notify();
     }
   }
+
+  get watches() { return this.definitions.list(); }
+  saveWatch(value: WatchDefinition) { this.mutate(() => this.definitions.set(value)); }
 
   get mode() { return this.persistence; }
   get warning() { return this.persistenceWarning; }
@@ -88,6 +94,7 @@ export class SessionState {
     this.inbox = this.inbox.toMemory();
     this.checkpoints = this.checkpoints.toMemory();
     this.identities = this.identities.toMemory();
+    this.definitions = this.definitions.toMemory();
     this.persistence = 'degraded';
     const reason = operation === 'read'
       ? 'MCP Events could not restore saved state. Some pending events or resume progress may be unavailable.'
