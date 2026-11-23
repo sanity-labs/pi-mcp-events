@@ -98,8 +98,9 @@ test('the Events client receives weather webhooks through its own HTTPS receiver
 test('weather webhook verifies, delivers, refreshes, and unsubscribes over HTTPS', {timeout: 15_000}, async t => {
   let attempts = 0;
   const receiver = await startHttpsWebhookReceiver({response: () => ({status: ++attempts === 1 ? 503 : 204})});
+  const callbackUrl = receiver.url.replace('127.0.0.1', 'localhost');
   const server = await startWeatherServer({port: 0, intervalMs: 0, webhookToken: 'test-token',
-    webhookCa: receiver.ca, webhookAllowedUrls: [receiver.url], webhookDeliveryOptions: {retryBaseMs: 10}});
+    webhookCa: receiver.ca, webhookAllowedUrls: [callbackUrl], webhookDeliveryOptions: {retryBaseMs: 10}});
   const wire = new EventsWire(() => createHttpTransport(new URL(server.url), {
     requestInit: {headers: {Authorization: 'Bearer test-token'}},
   }));
@@ -107,7 +108,7 @@ test('weather webhook verifies, delivers, refreshes, and unsubscribes over HTTPS
   t.after(async () => { await client.close(); await server.close(); await receiver.close(); });
   await client.connect();
   const params = {name: 'weather.reading', arguments: {stationId: 'harbor'},
-    delivery: {mode: 'webhook', url: receiver.url, secret: receiver.secret}, ttlMs: 60_000, cursor: null};
+    delivery: {mode: 'webhook', url: callbackUrl, secret: receiver.secret}, ttlMs: 60_000, cursor: null};
   const first = await wire.request('events/subscribe', params, result);
   assert.equal(receiver.requests[0].body.type, 'verification');
   assert.equal(receiver.requests[0].headers['x-mcp-subscription-id'], first.id);
@@ -122,7 +123,7 @@ test('weather webhook verifies, delivers, refreshes, and unsubscribes over HTTPS
   assert.equal(refreshed.id, first.id);
   assert.ok(refreshed.cursor);
   await wire.request('events/unsubscribe', {name: params.name, arguments: params.arguments,
-    delivery: {url: receiver.url}}, result);
+    delivery: {url: callbackUrl}}, result);
   server.advance();
   server.advance();
   await server.waitForWebhookIdle();

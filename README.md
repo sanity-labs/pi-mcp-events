@@ -1,6 +1,6 @@
 # Pi MCP Events
 
-An implementation of the **accepted MCP Events proposal, [SEP-3415 pinned at `60b15c1`](https://github.com/pja-ant/modelcontextprotocol/blob/60b15c16f2e7265ea34ac51099dc5be62f734692/seps/3415-events-extension.md)**, for [Pi](https://pi.dev). Targets MCP revision `2026-07-28`; the proposal is still open and may change before it is final. Receive events through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it's ready for a follow-up turn.
+MCP Events for [Pi](https://pi.dev). The extension implements the [MCP Events Beta specification](https://modelcontextprotocol.io/extensions/events/overview) on MCP revision `2026-07-28`. [SEP-3415](https://modelcontextprotocol.io/seps/3415-events-extension) is Final. Receive events through polling, streaming, or signed webhooks. Pi batches events while it works and starts a follow-up turn when it is idle.
 
 Read [The dream of real-time MCP (and what stands in the way)](https://www.sanity.io/engineering/the-dream-of-real-time-mcp?utm_source=github&utm_medium=readme&utm_campaign=pi-mcp-events) on the Sanity engineering blog for the product drivers behind this extension, and what we learned along the way. [Watch the demo video (MP4)](https://cdn.sanity.io/media-libraries/al34RQcBfuD7/videos/7ef17ab43f3386c047e687ad54d3ba978df099c6.mp4).
 
@@ -64,6 +64,27 @@ Then try these requests one at a time:
 - “Stop watching weather changes.”
 
 Pi keeps receiving events while you work. It delivers them when it is ready for a follow-up turn.
+
+## Use the weather server with any MCP client
+
+Run the server from a checkout with Node.js 24+.
+
+```sh
+npm ci
+npm run dev:weather -- --interval 0
+```
+
+Connect to `http://127.0.0.1:3015/mcp` using MCP revision `2026-07-28`. Discover the `io.modelcontextprotocol/events` extension and call `events/list`. Start polling or streaming `weather.reading` before generating a reading.
+
+```sh
+curl -X POST http://127.0.0.1:3015/advance -H 'Content-Type: application/json' -d '{}'
+```
+
+Each call advances one station, alternating Harbor and Hilltop. Filter by `arguments.stationId` using `harbor` or `hilltop`. Over Streamable HTTP, mirror that value in `Mcp-Param-Station`. Keep a cursor to replay matching events while they remain in the server's in-memory history. Restarting the server discards that history and reports a gap to clients that supply an earlier cursor.
+
+For stdio, start `node dev/weather-server.mjs --transport stdio` from the checkout. Leave off `--interval 0` to let the server generate readings automatically.
+
+For webhooks, set `WEATHER_WEBHOOK_TOKEN` when starting the HTTP server and send it with `Authorization: Bearer <token>` on subscribe and unsubscribe. Use an HTTPS callback that answers the signed verification challenge. For local HTTPS testing, set `WEATHER_WEBHOOK_LOCAL_ORIGIN` to the callback's exact loopback origin and `WEATHER_WEBHOOK_CA` to the certificate file. The server grants finite webhook lifetimes and clients refresh them.
 
 ## Using watches
 
@@ -161,5 +182,7 @@ Tested with Pi 1.5.2. From the checkout, run the checks (requires `openssl`):
 ```sh
 npm run validate
 ```
+
+The local [conformance fixture](test/fixtures/weather-conformance-server.mjs) uses the same server with additional event types and controls for replay gaps, source failures, subscription limits, and revoked access. Run `node test/fixtures/weather-conformance-server.mjs` and point the [MCP Events conformance runner](https://github.com/modelcontextprotocol/conformance/pull/521) at the endpoint it prints. The default demo exposes the weather feeds and `/advance`.
 
 This is an early release. [Report an issue](https://github.com/sanity-labs/pi-mcp-events/issues/new) if something goes wrong.

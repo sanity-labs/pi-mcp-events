@@ -128,25 +128,65 @@ describe('webhook delivery core', () => {
     expect(posts).toBe(1);
   });
 
-  it('uses the replacement secret for deliveries after a refresh', async () => {
+  it('signs with both secrets during rotation and retires the old secret', async () => {
     const nextSecret = `whsec_${randomBytes(32).toString('base64')}`;
     let received: {body: Buffer; headers: Record<string, string>} | undefined;
-    const manager = createWebhookDelivery({allowUrl: () => true, resolveHost: publicDns,
+    let now = Date.now();
+    const manager = createWebhookDelivery({allowUrl: () => true, resolveHost: publicDns, now: () => now,
       post: async (request: {body: Buffer; headers: Record<string, string>}) => {
         received = request;
         return {status: 204};
       },
     });
     managers.push(manager);
-    const original = await manager.subscribe(input());
-    const refreshed = await manager.subscribe(input({secret: nextSecret}));
+    const original = await manager.subscribe(input({ttlMs: 600_000}));
+    const refreshed = await manager.subscribe(input({secret: nextSecret, ttlMs: 600_000}));
     expect(refreshed.id).toBe(original.id);
+    const signature = (secret: string) => {
+      const {body, headers} = received!;
+      const digest = createHmac('sha256', Buffer.from(secret.slice(6), 'base64'))
+        .update(`${headers['webhook-id']}.${headers['webhook-timestamp']}.`).update(body).digest('base64');
+      return `v1,${digest}`;
+    };
     manager.emit(event('evt-1', 'c1'));
     await manager.waitForIdle();
-    const {body, headers} = received!;
-    const signature = createHmac('sha256', Buffer.from(nextSecret.slice(6), 'base64'))
-      .update(`${headers['webhook-id']}.${headers['webhook-timestamp']}.`).update(body).digest('base64');
-    expect(headers['webhook-signature']).toBe(`v1,${signature}`);
+    expect(received!.headers['webhook-signature']).toBe(`${signature(nextSecret)} ${signature(input().secret)}`);
+    now += 300_001;
+    manager.emit(event('evt-2', 'c2'));
+    await manager.waitForIdle();
+    expect(received!.headers['webhook-signature']).toBe(signature(nextSecret));
+  });
+
+  it('pauses sustained failures and resumes queued deliveries when the subscriber refreshes', async () => {
+    const failed = Promise.withResolvers();
+    let attempts = 0;
+    let healthy = false;
+    const manager = createWebhookDelivery({allowUrl: () => true, resolveHost: publicDns,
+      suspensionMinAttempts: 2, retryBaseMs: 1,
+      post: async () => {
+        attempts++;
+        if (attempts === 2) failed.resolve(undefined);
+        return {status: healthy ? 204 : 503};
+      },
+    });
+    managers.push(manager);
+    try {
+      await manager.subscribe(input());
+      manager.emit(event('evt-1', 'c1'));
+      await failed.promise;
+      await new Promise(resolve => setTimeout(resolve, 10));
+      manager.emit(event('evt-2', 'c2'));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(attempts).toBe(2);
+      healthy = true;
+      const refreshed = await manager.subscribe(input());
+      expect(refreshed.deliveryStatus).toMatchObject({active: false, lastError: 'http_5xx'});
+      await manager.waitForIdle();
+      expect((await manager.subscribe(input())).deliveryStatus).toMatchObject({active: true, lastError: null});
+      expect(attempts).toBe(4);
+    } finally {
+      manager.close();
+    }
   });
 
   it('does not retry a 410 response or remove the subscription', async () => {
