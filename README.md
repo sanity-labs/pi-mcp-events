@@ -65,27 +65,6 @@ Then try these requests one at a time:
 
 Pi keeps receiving events while you work. It delivers them when it is ready for a follow-up turn.
 
-## Use the weather server with any MCP client
-
-Run the server from a checkout with Node.js 24+.
-
-```sh
-npm ci
-npm run dev:weather -- --interval 0
-```
-
-Connect to `http://127.0.0.1:3015/mcp` using MCP revision `2026-07-28`. Discover the `io.modelcontextprotocol/events` extension and call `events/list`. Start polling or streaming `weather.reading` before generating a reading.
-
-```sh
-curl -X POST http://127.0.0.1:3015/advance -H 'Content-Type: application/json' -d '{}'
-```
-
-Each call advances one station, alternating Harbor and Hilltop. Filter by `arguments.stationId` using `harbor` or `hilltop`. Over Streamable HTTP, mirror that value in `Mcp-Param-Station`. Keep a cursor to replay matching events while they remain in the server's in-memory history. Restarting the server discards that history and reports a gap to clients that supply an earlier cursor.
-
-For stdio, start `node dev/weather-server.mjs --transport stdio` from the checkout. Leave off `--interval 0` to let the server generate readings automatically.
-
-For webhooks, set `WEATHER_WEBHOOK_TOKEN` when starting the HTTP server and send it with `Authorization: Bearer <token>` on subscribe and unsubscribe. Use an HTTPS callback that answers the signed verification challenge. For local HTTPS testing, set `WEATHER_WEBHOOK_LOCAL_ORIGIN` to the callback's exact loopback origin and `WEATHER_WEBHOOK_CA` to the certificate file. The server grants finite webhook lifetimes and clients refresh them.
-
 ## Using watches
 
 ### Behavior
@@ -182,7 +161,5 @@ Tested with Pi 1.5.2. From the checkout, run the checks (requires `openssl`):
 ```sh
 npm run validate
 ```
-
-The local [conformance fixture](test/fixtures/weather-conformance-server.mjs) uses the same server with additional event types and controls for replay gaps, source failures, subscription limits, and revoked access. Run `node test/fixtures/weather-conformance-server.mjs` and point the [MCP Events conformance runner](https://github.com/modelcontextprotocol/conformance/pull/521) at the endpoint it prints. The default demo exposes the weather feeds and `/advance`.
 
 This is an early release. [Report an issue](https://github.com/sanity-labs/pi-mcp-events/issues/new) if something goes wrong.
