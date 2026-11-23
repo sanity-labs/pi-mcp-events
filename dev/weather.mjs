@@ -7,20 +7,21 @@ const reading = {
   temperatureC: z.number(), windKph: z.number().nonnegative(),
   rainfallMmPerHour: z.number().nonnegative(), daylight: z.boolean(),
 };
-export const payloads = {
+const payloads = {
   'weather.reading': z.strictObject(reading),
   'weather.changed': z.strictObject({...reading, previousCondition: condition}),
   'weather.alert': z.strictObject({...reading, kind: z.literal('storm'), status: z.enum(['raised', 'cleared']), message: z.string()}),
 };
-export const catalog = Object.entries(payloads).map(([name, payload]) => ({
-  name,
+export const weatherEventTypes = Object.entries(payloads).map(([name, payloadSchema]) => [name, {
   description: {
     'weather.reading': 'Island weather: temperature (°C), wind (km/h), rain (mm/h), and daylight.',
     'weather.changed': 'Condition changes, staggered between stations over several minutes.',
     'weather.alert': 'A storm warning is raised or cleared once per transition, with the current reading.',
   }[name],
-  delivery: ['poll', 'push', 'webhook'], inputSchema: z.toJSONSchema(subscriptionArguments), payloadSchema: z.toJSONSchema(payload),
-}));
+  inputSchema: subscriptionArguments,
+  payloadSchema,
+  match: (event, args) => !args.stationId || event.data.stationId === args.stationId,
+}]);
 
 export function createWeather({now = Date.now} = {}) {
   const stations = [

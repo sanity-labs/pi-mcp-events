@@ -35,7 +35,7 @@ try {
   lock.packages[''] = consumerManifest;
   writeFileSync(join(consumer, 'package-lock.json'), JSON.stringify(lock));
   npm(['install', '--no-audit', '--no-fund', '--prefer-offline', join(consumer, archive.filename),
-    ...['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'].map(name => `${name}@${manifest.devDependencies[name]}`)], consumer);
+    ...['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'].map(name => `${name}@${lock.packages[`node_modules/${name}`].version}`)], consumer);
   const resolver = join(consumer, 'resolve.mjs');
   writeFileSync(resolver, 'export const resolve = name => import.meta.resolve(name);');
   resolveInstalled = (await import(pathToFileURL(resolver).href)).resolve;

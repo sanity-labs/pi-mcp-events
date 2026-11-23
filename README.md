@@ -1,6 +1,6 @@
 # Pi MCP Events
 
-An implementation of the **accepted MCP Events proposal, [SEP-3415 pinned at `60b15c1`](https://github.com/pja-ant/modelcontextprotocol/blob/60b15c16f2e7265ea34ac51099dc5be62f734692/seps/3415-events-extension.md)**, for [Pi](https://pi.dev). Targets MCP revision `2026-07-28`; the proposal is still open and may change before it is final. Receive events through polling, streaming, or signed webhooks. Events arrive while Pi works and are delivered in batches when it's ready for a follow-up turn.
+MCP Events for [Pi](https://pi.dev). The extension implements the [MCP Events Beta specification](https://modelcontextprotocol.io/extensions/events/overview) on MCP revision `2026-07-28`. [SEP-3415](https://modelcontextprotocol.io/seps/3415-events-extension) is Final. Receive events through polling, streaming, or signed webhooks. Pi batches events while it works and starts a follow-up turn when it is idle.
 
 Read [The dream of real-time MCP (and what stands in the way)](https://www.sanity.io/engineering/the-dream-of-real-time-mcp?utm_source=github&utm_medium=readme&utm_campaign=pi-mcp-events) on the Sanity engineering blog for the product drivers behind this extension, and what we learned along the way. [Watch the demo video (MP4)](https://cdn.sanity.io/media-libraries/al34RQcBfuD7/videos/7ef17ab43f3386c047e687ad54d3ba978df099c6.mp4).
 

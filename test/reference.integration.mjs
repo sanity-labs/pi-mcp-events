@@ -295,7 +295,9 @@ test('weather reference: discovery, validation, filtering, pagination, and stabl
   for (const params of [{name: 'missing'}, {arguments: {island: 'other'}}, {maxEvents: 0}, {cursor: 'garbage'}, {cursor: initial.cursor, arguments: {stationId: 'other'}}]) {
     await assert.rejects(poll(null, params), error => [-32602, -32023].includes(error.code));
   }
-  await assert.rejects(wire.request('events/subscribe', {name: 'weather.reading'}, result), /Method not found/);
+  await assert.rejects(wire.request('events/subscribe', {
+    name: 'weather.reading', delivery: {mode: 'webhook', url: 'https://example.invalid/hooks', secret: 'unused'},
+  }, result), error => error.code === -32026 && error.data?.feature === 'deliveryMode');
 });
 
 test('weather reference: HTTP routing headers and loopback guards reject invalid requests', async t => {

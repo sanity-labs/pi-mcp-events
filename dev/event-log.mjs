@@ -13,6 +13,9 @@ export function createEventLog(limit = 1000) {
       if (entries.length > limit) entries.shift();
       return event;
     },
+    discard(name) {
+      for (const entry of entries) if (entry.event?.name === name) entry.event = undefined;
+    },
     read({cursor, key, matches, maxEvents = limit, maxAgeMs}) {
       let after = position;
       let truncated = false;
@@ -27,12 +30,12 @@ export function createEventLog(limit = 1000) {
         if (decoded[0] !== instance || after < floor) { after = floor; truncated = true; }
         else if (after > position) throw new Error('Invalid event cursor');
         if (maxAgeMs !== undefined) {
-          const expired = entries.filter(entry => Date.parse(entry.event.timestamp) < Date.now() - maxAgeMs).at(-1)?.position;
+          const expired = entries.filter(entry => Date.parse(entry.event?.timestamp) < Date.now() - maxAgeMs).at(-1)?.position;
           if (expired !== undefined && expired > after) { after = expired; truncated = true; }
         }
       }
       const startCursor = cursorAt(key, after);
-      const pending = entries.filter(entry => entry.position > after && matches(entry.event));
+      const pending = entries.filter(entry => entry.position > after && entry.event && matches(entry.event));
       const selected = pending.slice(0, maxEvents);
       const hasMore = selected.length < pending.length;
       return {

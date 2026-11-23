@@ -95,7 +95,7 @@ for (const ending of ['EOF before discovery', 'EOF after discovery', 'oversized 
       assert.deepEqual(catalog.result.events.map(event => event.delivery), names.map(() => ['poll', 'push']));
       request(3, 'events/subscribe', {name: 'weather.alert', arguments: {}, delivery: {mode: 'webhook', url: 'https://example.invalid', secret: 'unused'}});
       await until(() => stdout.includes('"id":3'), 'unsupported webhook response');
-      assert.equal(stdout.trim().split('\n').map(line => JSON.parse(line)).find(message => message.id === 3).error.code, -32601);
+      assert.equal(stdout.trim().split('\n').map(line => JSON.parse(line)).find(message => message.id === 3).error.code, -32026);
     }
     if (ending.startsWith('EOF')) child.stdin.end();
     else if (ending === 'oversized request') child.stdin.write('x'.repeat(70_000));
